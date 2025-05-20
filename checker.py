@@ -1,82 +1,74 @@
+import os
 import asyncio
 import aiohttp
-import random
-import json
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 import uvicorn
+from dotenv import load_dotenv
+
+load_dotenv()  # Loads variables from a .env file if present
 
 app = FastAPI()
 
-TELEGRAM_TOKEN = "7527264620:AAGG5qpYqV3o0h0NidwmsTOKxqVsmRIaX1A"
-TELEGRAM_CHAT_ID = "7755395640"
+# --- Config ---
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")  # Get from env vars
+TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")  # Get from env vars
 BOT_API_URL = f"https://api.telegram.org/bot7527264620:AAGG5qpYqV3o0h0NidwmsTOKxqVsmRIaX1A"
 
+# --- State ---
 CHECKER_RUNNING = False
 
-USERNAME_LIST = [
-    "tsla", "kurv", "loco", "vibe", "zest", "flux", "nova", "drip"
-]
-
-PROXIES = ["http://example:proxy@1.2.3.4:8080"]  # Replace with real proxies
-
-def generate_username():
-    if USERNAME_LIST:
-        return USERNAME_LIST.pop(0)
-    return ''.join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=4))
+# Example usernames to check
+USERNAME_LIST = ["tsla", "kurv", "loco", "vibe", "zest"]
 
 async def send_message(text):
-    payload = {
+    data = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML"
     }
     async with aiohttp.ClientSession() as session:
-        await session.post(f"{BOT_API_URL}/sendMessage", json=payload)
+        await session.post(f"{BOT_API_URL}/sendMessage", json=data)
 
-async def check_username(session, username, proxy):
-    try:
-        async with session.get(f"https://www.tiktok.com/@{username}", proxy=proxy, timeout=10) as resp:
-            return resp.status == 404
-    except:
-        return None
+async def check_username(username):
+    # Dummy check: 50% chance available
+    await asyncio.sleep(0.5)
+    import random
+    return random.choice([True, False])
 
-async def run_checker():
+async def run_checker_loop():
     global CHECKER_RUNNING
     CHECKER_RUNNING = True
-    await send_message("✅ Checker started.")
+    print("Checker started")
 
-    if not PROXIES:
-        await send_message("❌ No proxies available.")
-        CHECKER_RUNNING = False
-        return
+    while CHECKER_RUNNING and USERNAME_LIST:
+        username = USERNAME_LIST.pop(0)
+        print(f"Checking username: {username}")
 
-    async with aiohttp.ClientSession() as session:
-        while CHECKER_RUNNING:
-            username = generate_username()
-            proxy = random.choice(PROXIES)
+        available = await check_username(username)
+        if available:
+            await send_message(f"Username <b>@{username}</b> is available!")
 
-            result = await check_username(session, username, proxy)
-            if result:
-                await send_message(f"<b>@{username}</b> is available!")
+        await asyncio.sleep(1)
 
-            await asyncio.sleep(random.uniform(0.5, 1.0))
+    CHECKER_RUNNING = False
+    print("Checker stopped")
 
 @app.post("/webhook")
-async def telegram_webhook(request: Request):
+async def webhook(request: Request):
     global CHECKER_RUNNING
-    try:
-        data = await request.json()
-    except:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+    data = await request.json()
+    print(f"Received update: {data}")
 
-    message = data.get("message", {})
-    text = message.get("text", "")
+    if "message" in data:
+        message = data["message"]
+        text = message.get("text", "")
 
-    if text == "/start" and not CHECKER_RUNNING:
-        asyncio.create_task(run_checker())
-        return {"ok": True}
+        if text == "/start":
+            await send_message("Checker is starting...")
+            if not CHECKER_RUNNING:
+                asyncio.create_task(run_checker_loop())
 
     return {"ok": True}
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
