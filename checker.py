@@ -70,8 +70,28 @@ async def fetch_webshare_proxies():
     except Exception as e:
         print(f"❌ Error fetching proxies: {e}")
 
-def generate_username(length=4):
-    return ''.join(random.choices(string.ascii_lowercase, k=length))
+# --- Semi-OG username list ---
+SEMI_OG_USERNAMES = [
+    "tsla", "kurv", "curv", "stak", "lcky", "loky", "prvn", "blnk",
+    "zync", "lyft", "voxy", "quix", "nexo", "fizz", "drft", "plnk",
+    "vibe", "moxy", "jolt", "flux", "kink", "bump", "glow", "nova",
+    "loop", "skye", "zest", "rize", "peak", "mesh", "vivo", "qube",
+    # Add more to taste, total a few hundred preferred
+]
+
+# Create an async-safe queue for usernames
+USERNAME_QUEUE = asyncio.Queue()
+
+async def load_usernames():
+    # Shuffle and load usernames into queue
+    random.shuffle(SEMI_OG_USERNAMES)
+    for username in SEMI_OG_USERNAMES:
+        await USERNAME_QUEUE.put(username)
+
+async def get_next_username():
+    if USERNAME_QUEUE.empty():
+        return None
+    return await USERNAME_QUEUE.get()
 
 async def send_message(text):
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -141,10 +161,16 @@ async def run_checker_loop():
             await asyncio.sleep(5)
             continue
 
-        username = generate_username()
+        username = await get_next_username()
+        if not username:
+            await send_message("⚠️ No more usernames to check. Stopping.")
+            CHECKER_RUNNING = False
+            break
+
         available = await check_username(username)
         if available:
             await send_message(f"🎯 Available: <b>@{username}</b>")
+
         await asyncio.sleep(random.uniform(0.7, 1.3))
 
     await send_message("🛑 Checker stopped")
@@ -160,6 +186,7 @@ async def webhook(request: Request):
         text = data["message"].get("text", "")
         if text == "/start":
             if not CHECKER_RUNNING:
+                await load_usernames()  # load queue fresh on start
                 asyncio.create_task(run_checker_loop())
             else:
                 await send_message("🔁 Already running.")
