@@ -206,39 +206,31 @@ async def start_checker(background_tasks: BackgroundTasks):
 @app.post("/webhook")
 async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
-    print("Webhook received:", data)
+    print("[WEBHOOK DATA]", data)
 
-    async with aiohttp.ClientSession() as session:
+    if "message" in data:
+        message = data["message"]
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "")
 
-        async def answer_callback_query(callback_query_id):
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
-            payload = {"callback_query_id": callback_query_id}
-            try:
-                await session.post(url, json=payload)
-            except Exception as e:
-                print(f"Error answering callback query: {e}")
-
-        if "message" in data:
-            message = data["message"]
-            chat_id = message["chat"]["id"]
-
-            if message.get("text") == "/start":
-                await send_inline_buttons(chat_id)
-                background_tasks.add_task(run_checker)
+        if text == "/start":
+            await send_inline_buttons(chat_id)
+            background_tasks.add_task(run_checker)
+            async with aiohttp.ClientSession() as session:
                 await send_telegram_message(session, ["✅ TikTok checker started."], chat_id)
 
-        elif "callback_query" in data:
-            query = data["callback_query"]
-            chat_id = query["message"]["chat"]["id"]
-            command = query["data"]
-            callback_query_id = query["id"]
+    elif "callback_query" in data:
+        query = data["callback_query"]
+        chat_id = query["message"]["chat"]["id"]
+        command = query["data"]
 
-            if command == "start":
-                background_tasks.add_task(run_checker)
+        if command == "start":
+            background_tasks.add_task(run_checker)
+            async with aiohttp.ClientSession() as session:
                 await send_telegram_message(session, ["✅ TikTok checker started."], chat_id)
-            elif command == "stop":
+
+        elif command == "stop":
+            async with aiohttp.ClientSession() as session:
                 await send_telegram_message(session, ["⛔ Stop not implemented yet."], chat_id)
-
-            await answer_callback_query(callback_query_id)
 
     return {"ok": True}
