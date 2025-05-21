@@ -115,13 +115,18 @@ async def webhook(request: Request):
         text = message.get("text", "")
 
         if text == "/start":
-            await send_message("Checker is starting...")
             if not CHECKER_RUNNING:
+                await send_message("Checker is starting...")
                 asyncio.create_task(run_checker_loop())
+            else:
+                print("Checker already running, ignoring /start command.")
 
         elif text == "/stop":
-            CHECKER_RUNNING = False
-            await send_message("Checker stopped.")
+            if CHECKER_RUNNING:
+                CHECKER_RUNNING = False
+                await send_message("Checker stopped.")
+            else:
+                print("Checker not running, ignoring /stop command.")
 
     return {"ok": True}
 
