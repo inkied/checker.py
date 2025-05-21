@@ -22,7 +22,6 @@ proxy_stats = {}  # proxy -> {success, fail, avg_response}
 usernames_batch_current = []
 usernames_checked_info = {}  # username -> {available_since, last_released, last_checked}
 
-
 # --- Telegram messaging helper ---
 async def send_telegram(text, reply_markup=None):
     payload = {
@@ -37,7 +36,6 @@ async def send_telegram(text, reply_markup=None):
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{telegram_api_url}/sendMessage", json=payload) as resp:
             return await resp.json()
-
 
 # --- Proxy fetching and validation ---
 async def fetch_proxies():
@@ -65,7 +63,6 @@ async def fetch_proxies():
             await send_telegram(f"✅ Fetched {count} proxies from Webshare.")
             return True
 
-
 async def validate_proxy(proxy: str, timeout=8):
     test_url = "https://www.tiktok.com"
     try:
@@ -74,7 +71,6 @@ async def validate_proxy(proxy: str, timeout=8):
                 return resp.status == 200
     except Exception:
         return False
-
 
 async def refresh_and_validate_proxies():
     await fetch_proxies()
@@ -91,12 +87,10 @@ async def refresh_and_validate_proxies():
                 pass
     await send_telegram(f"🌐 Proxies Validated: {len(valid_proxies)}/{len(proxy_pool) + len(valid_proxies)}")
 
-
 # --- Username batch generation ---
 def generate_usernames_batch(size=50):
     now = int(time.time())
     return [f"user{now + i}" for i in range(size)]
-
 
 # --- TikTok availability check ---
 async def check_username_availability(username: str, proxy: str = None):
@@ -118,7 +112,6 @@ async def check_username_availability(username: str, proxy: str = None):
                     return False
     except Exception:
         return False
-
 
 # --- Main checker loop ---
 async def checker_loop():
@@ -176,7 +169,6 @@ async def checker_loop():
         await asyncio.sleep(1)
     await send_telegram("⏹️ Checker stopped.")
 
-
 # --- Telegram webhook handler ---
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -212,7 +204,7 @@ async def telegram_webhook(request: Request):
 
     global checker_task
 
-        if text in ("/start", "/startchecker"):
+    if text in ("/start", "/startchecker"):
         if checking_active:
             await send_telegram("⚠️ Checker already running.")
         else:
@@ -235,7 +227,6 @@ async def telegram_webhook(request: Request):
 
     return JSONResponse({"status": "command ignored"})
 
-
 # --- Startup event ---
 @app.on_event("startup")
 async def startup_event():
@@ -243,9 +234,9 @@ async def startup_event():
     checking_active = False
     await send_telegram("🚀 Bot deployed and ready.")
 
-
 # For Railway or any ASGI server to run this
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run("checker:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), log_level="info")
+    # NOTE: If you run this file from the project root folder,
+    #       use "TikTokChecker.checker:app" as the app location.
+    uvicorn.run("TikTokChecker.checker:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), log_level="info")
