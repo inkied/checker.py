@@ -1,6 +1,6 @@
 import asyncio
 import aiohttp
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 import logging
 import random
 from time import time
@@ -10,14 +10,14 @@ app = FastAPI()
 # === CONFIG ===
 TELEGRAM_TOKEN = "7698527405:AAE8z3q9epDTXZFZMNZRW9ilU-ayevMQKVA"
 TELEGRAM_CHAT_ID = "7755395640"
-TELEGRAM_API = f"https://api.telegram.org/botAAE8z3q9epDTXZFZMNZRW9ilU-ayevMQKVA"
+TELEGRAM_API = f"https://api.telegram.org/bot7698527405:AAE8z3q9epDTXZFZMNZRW9ilU-ayevMQKVA"
 WEB_SHARE_API_KEY = "cmaqd2pxyf6h1bl93ozf7z12mm2efjsvbd7w366z"
 WEB_SHARE_API_URL = "https://proxy.webshare.io/api/proxy/list/?page=1&page_size=100&protocol=http,https,socks4,socks5"
 
 CHECK_CONCURRENCY = 30
 USERNAME_BATCH_SIZE = 5
 PROXY_TIMEOUT = 10
-PROXY_COOLDOWN = 120  # seconds to wait before retrying failed proxy
+PROXY_COOLDOWN = 120  # seconds
 PROXY_MAX_FAILS = 3   # max fails before cooldown
 
 # Globals
@@ -27,13 +27,11 @@ proxies_lock = asyncio.Lock()
 available_usernames = []
 available_lock = asyncio.Lock()
 
-# 4-letter semi-OG wordlist (brandable)
 semi_og_words = [
     "tsla", "kurv", "curv", "stak", "lcky", "loky", "juno", "moxi", "vibe",
     "zora", "neon", "flux", "hype", "rave", "glow", "nova", "perk", "quip", "zeal"
 ]
 
-# 5-6 letter pronounceable English-like syllable combos
 syllables = [
     "ba", "be", "bi", "bo", "bu",
     "ca", "ce", "ci", "co", "cu",
@@ -74,17 +72,13 @@ async def telegram_webhook(request: Request):
             asyncio.create_task(run_checker(chat_id))
 
         elif text.lower() == "/stop":
-            # Implement stop logic if needed (not included here)
+            # Optionally add stop functionality
             await send_message(chat_id, "🛑 Checker stopping is not implemented yet.")
 
         return {"ok": True}
     except Exception as e:
         logging.error(f"Webhook error: {e}")
         return {"ok": False, "error": str(e)}
-
-@app.get("/webhook")
-async def webhook_get():
-    raise HTTPException(status_code=405, detail="GET method not allowed on /webhook")
 
 async def send_message(chat_id, text):
     async with aiohttp.ClientSession() as session:
@@ -147,13 +141,10 @@ async def validate_proxies():
     logging.info(f"Proxy validation complete. {len(proxies)} proxies are valid.")
 
 def generate_username():
-    # 50% chance semi-OG 4-letter from wordlist
-    # 50% chance 5-6 letter pronounceable combo
     if random.random() < 0.5:
         return random.choice(semi_og_words)
     else:
         length = random.choice([5,6])
-        # build username by concatenating random syllables
         username = ""
         while len(username) < length:
             username += random.choice(syllables)
@@ -197,11 +188,9 @@ async def run_checker(chat_id: int):
             async with semaphore:
                 proxy = None
                 async with proxies_lock:
-                    # Pick a proxy that is not on cooldown
                     now = time()
                     available_proxies = [p for p in proxies if p["cooldown_until"] <= now]
                     if not available_proxies:
-                        # all proxies cooling down - wait a bit
                         logging.info("All proxies cooling down, waiting 10s...")
                         await asyncio.sleep(10)
                         continue
@@ -218,18 +207,13 @@ async def run_checker(chat_id: int):
                             msg = "✅ *Available TikTok usernames:*\n" + "\n".join(f"`{u}`" for u in available_usernames)
                             await send_message(chat_id, msg)
                             available_usernames.clear()
-                    # reset fails for proxy on success
                     async with proxies_lock:
                         proxy_dict["fails"] = 0
                         proxy_dict["cooldown_until"] = 0
                 else:
                     logging.info(f"❌ Username taken or check failed: {username}")
-                    # On fail increase proxy fails count and possibly cooldown
                     async with proxies_lock:
                         proxy_dict["fails"] += 1
                         if proxy_dict["fails"] >= PROXY_MAX_FAILS:
                             proxy_dict["cooldown_until"] = time() + PROXY_COOLDOWN
-                            logging.info(f"Proxy {proxy_dict['proxy']} cooldown for {PROXY_COOLDOWN}s due to repeated fails.")
-                            proxy_dict["fails"] = 0
-
-            await asyncio.sleep(random.uniform(0.4, 1.2))  # small delay for stealth
+                            logging.info(f"Proxy {proxy_dict['proxy']} cooling down for {PROXY_COOLDOWN}s due to repeated fails.")
