@@ -3,9 +3,9 @@ import asyncio
 import aiohttp
 import random
 import string
-import time
 from fastapi import FastAPI, Request
 import uvicorn
+import time
 
 app = FastAPI()
 
@@ -19,20 +19,41 @@ WEBHOOK_URL = "https://checkerpy-production-a7e1.up.railway.app/webhook"
 # --- State ---
 CHECKER_RUNNING = False
 PROXIES = []
-proxy_index = 0
+proxy_state = {}  # proxy -> {'fail_count': int, 'last_used': float}
 
-PROXY_REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
+# Configurable parameters
+MIN_REQUEST_INTERVAL = 2  # seconds before reusing the same proxy
+MAX_FAILS = 3             # max fails before removing proxy
+
+def get_ready_proxies():
+    now = asyncio.get_event_loop().time()
+    ready = []
+    for proxy in PROXIES:
+        state = proxy_state.get(proxy, {'fail_count': 0, 'last_used': 0})
+        if (now - state['last_used'] >= MIN_REQUEST_INTERVAL) and (state['fail_count'] < MAX_FAILS):
+            ready.append(proxy)
+    return ready
 
 def get_next_proxy():
-    global proxy_index
-    if not PROXIES:
-        return None
-    proxy = PROXIES[proxy_index]
-    proxy_index = (proxy_index + 1) % len(PROXIES)
-    return proxy
+    ready_proxies = get_ready_proxies()
+    if not ready_proxies:
+        # Reset fail counts for proxies with enough cooldown to avoid deadlock
+        now = asyncio.get_event_loop().time()
+        for proxy in PROXIES:
+            state = proxy_state.setdefault(proxy, {'fail_count': 0, 'last_used': 0})
+            if now - state['last_used'] > MIN_REQUEST_INTERVAL * 5:
+                state['fail_count'] = 0
+        ready_proxies = get_ready_proxies()
+        if not ready_proxies:
+            # Pick any proxy to keep going if still none ready
+            if PROXIES:
+                return random.choice(PROXIES)
+            else:
+                return None
+    return random.choice(ready_proxies)
 
 async def fetch_webshare_proxies():
-    global PROXIES
+    global PROXIES, proxy_state
     if not WEBSHARE_API_KEY:
         print("❌ WEBSHARE_API_KEY not set in environment!")
         return
@@ -62,6 +83,8 @@ async def fetch_webshare_proxies():
                         p = f"http://{proxy['proxy_address']}:{proxy['ports']['http']}"
                     proxies.append(p)
                 PROXIES = proxies
+                # Reset proxy_state for new proxies
+                proxy_state = {p: {'fail_count': 0, 'last_used': 0} for p in PROXIES}
                 print(f"🌀 Fetched {len(PROXIES)} proxies from Webshare")
                 if len(PROXIES) == 0:
                     print("⚠️ No proxies available from Webshare response.")
@@ -80,7 +103,7 @@ async def send_message(text):
     async with aiohttp.ClientSession() as session:
         await session.post(f"{BOT_API_URL}/sendMessage", json=data)
 
-async def check_username(username):
+async def check_username(username, retry=True):
     url = f"https://www.tiktok.com/@{username}"
     headers = {
         "User-Agent": random.choice([
@@ -92,6 +115,13 @@ async def check_username(username):
     }
 
     proxy = get_next_proxy()
+    if proxy is None:
+        print("⚠️ No proxies available to check username.")
+        return False
+
+    proxy_state.setdefault(proxy, {'fail_count': 0, 'last_used': 0})
+    proxy_state[proxy]['last_used'] = asyncio.get_event_loop().time()
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, proxy=proxy, allow_redirects=False, timeout=10) as resp:
@@ -99,21 +129,43 @@ async def check_username(username):
 
                 if resp.status == 404:
                     print(f"✅ Available: {username}")
+                    proxy_state[proxy]['fail_count'] = 0
                     return True
                 elif resp.status == 200:
                     print(f"❌ Taken: {username}")
+                    proxy_state[proxy]['fail_count'] = 0
                     return False
                 elif resp.status in [301, 302]:
-                    print(f"⚠️ Redirected (likely blocked by TikTok) — HTTP {resp.status}")
+                    print(f"⚠️ Redirected (likely blocked) — HTTP {resp.status} on proxy {proxy}")
+                    proxy_state[proxy]['fail_count'] += 1
+                    if proxy_state[proxy]['fail_count'] >= MAX_FAILS:
+                        if proxy in PROXIES:
+                            PROXIES.remove(proxy)
+                            proxy_state.pop(proxy, None)
+                            print(f"⚠️ Removed proxy due to redirects: {proxy}. {len(PROXIES)} proxies left.")
+                    if retry:
+                        print(f"⏳ Waiting 5 seconds before retrying username {username} with new proxy...")
+                        await asyncio.sleep(5)
+                        return await check_username(username, retry=False)
+                    return False
                 else:
                     print(f"⚠️ Unknown response for {username}: HTTP {resp.status}")
-                return False
+                    proxy_state[proxy]['fail_count'] += 1
+                    if proxy_state[proxy]['fail_count'] >= MAX_FAILS:
+                        if proxy in PROXIES:
+                            PROXIES.remove(proxy)
+                            proxy_state.pop(proxy, None)
+                            print(f"⚠️ Removed proxy due to unknown response: {proxy}. {len(PROXIES)} proxies left.")
+                    return False
 
     except Exception as e:
         print(f"❌ Proxy error on {proxy}: {e}")
-        if proxy in PROXIES:
-            PROXIES.remove(proxy)
-            print(f"⚠️ Removed bad proxy: {proxy}. {len(PROXIES)} proxies left.")
+        proxy_state[proxy]['fail_count'] += 1
+        if proxy_state[proxy]['fail_count'] >= MAX_FAILS:
+            if proxy in PROXIES:
+                PROXIES.remove(proxy)
+                proxy_state.pop(proxy, None)
+                print(f"⚠️ Removed proxy due to errors: {proxy}. {len(PROXIES)} proxies left.")
         return False
 
 async def run_checker_loop():
@@ -121,16 +173,12 @@ async def run_checker_loop():
     CHECKER_RUNNING = True
     print("✅ Checker started")
 
-    last_proxy_refresh = time.time()
-
     while CHECKER_RUNNING:
-        # Refresh proxies every 15 minutes or if fewer than 20 proxies remain
-        if time.time() - last_proxy_refresh > PROXY_REFRESH_INTERVAL or len(PROXIES) < 20:
-            print("🌀 Refreshing proxies...")
+        if not PROXIES:
+            print("⚠️ Proxy list empty, fetching new proxies...")
             await fetch_webshare_proxies()
-            last_proxy_refresh = time.time()
             if not PROXIES:
-                print("❌ No proxies after refresh, sleeping 30 seconds...")
+                print("❌ Still no proxies available, sleeping 30 seconds before retry...")
                 await asyncio.sleep(30)
                 continue
 
@@ -144,7 +192,7 @@ async def run_checker_loop():
         else:
             print(f"⛔ {username} is taken or check failed")
 
-        await asyncio.sleep(1)  # moderate delay, not too fast
+        await asyncio.sleep(random.uniform(0.7, 1.3))
 
     CHECKER_RUNNING = False
     print("🛑 Checker stopped")
@@ -162,50 +210,4 @@ async def webhook(request: Request):
         if text == "/start":
             if not CHECKER_RUNNING:
                 await send_message("⚙️ Checker is starting...")
-                asyncio.create_task(run_checker_loop())
-            else:
-                print("⚠️ Checker already running, ignoring /start command.")
-
-        elif text == "/stop":
-            if CHECKER_RUNNING:
-                CHECKER_RUNNING = False
-                await send_message("🛑 Checker stopped.")
-            else:
-                print("⚠️ Checker not running, ignoring /stop command.")
-
-    return {"ok": True}
-
-@app.get("/")
-async def root():
-    return {"status": "running"}
-
-async def test_proxy(proxy):
-    test_url = "https://httpbin.org/ip"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(test_url, proxy=proxy, timeout=10) as resp:
-                print(f"✅ Proxy working: {await resp.text()}")
-    except Exception as e:
-        print(f"❌ Proxy failed: {proxy} - {e}")
-
-@app.on_event("startup")
-async def startup_event():
-    print(f"Using Webshare API key (start): {WEBSHARE_API_KEY[:5]}...")
-    await fetch_webshare_proxies()
-    if PROXIES:
-        await test_proxy(PROXIES[0])
-
-    async with aiohttp.ClientSession() as session:
-        set_url = f"{BOT_API_URL}/setWebhook"
-        set_resp = await session.post(set_url, json={"url": WEBHOOK_URL})
-        print("🔗 Set webhook response:", await set_resp.json())
-
-        info_url = f"{BOT_API_URL}/getWebhookInfo"
-        info_resp = await session.get(info_url)
-        info_data = await info_resp.json()
-        print("ℹ️ Current webhook info:", info_data)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    print(f"🚀 Starting server on port: {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+               
