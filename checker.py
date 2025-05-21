@@ -28,18 +28,35 @@ def get_ready_proxies():
     now = asyncio.get_event_loop().time()
     return [p for p in PROXIES if (now - proxy_state[p]['last_used'] >= MIN_REQUEST_INTERVAL and proxy_state[p]['fail_count'] < MAX_FAILS)]
 
-def get_next_proxy():
+def get_next_proxy(exclude=None):
+    """Get next ready proxy, optionally excluding some proxy or proxies"""
     ready = get_ready_proxies()
+    if exclude:
+        if isinstance(exclude, str):
+            exclude = {exclude}
+        else:
+            exclude = set(exclude)
+        ready = [p for p in ready if p not in exclude]
+
     if not ready:
         now = asyncio.get_event_loop().time()
+        # Reset fail counts for proxies not used recently
         for proxy in PROXIES:
             state = proxy_state[proxy]
             if now - state['last_used'] > MIN_REQUEST_INTERVAL * 5:
                 state['fail_count'] = 0
-        ready = get_ready_proxies()
+        ready = [p for p in PROXIES if proxy_state[p]['fail_count'] < MAX_FAILS and (now - proxy_state[p]['last_used'] >= MIN_REQUEST_INTERVAL)]
+        if exclude:
+            ready = [p for p in ready if p not in exclude]
         if not ready and PROXIES:
-            return random.choice(PROXIES)
-        return None
+            # last resort, pick any proxy excluding exclude list
+            candidates = [p for p in PROXIES if not exclude or p not in exclude]
+            if candidates:
+                return random.choice(candidates)
+            else:
+                return None
+        if not ready:
+            return None
     return random.choice(ready)
 
 async def fetch_webshare_proxies():
@@ -115,38 +132,60 @@ async def send_message(text):
     async with aiohttp.ClientSession() as session:
         await session.post(f"{BOT_API_URL}/sendMessage", json=data)
 
-async def check_username(username, retry=True):
-    url = f"https://www.tiktok.com/@{username}"
-    headers = {
-        "User-Agent": random.choice([
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X)...",
-            "Mozilla/5.0 (Windows NT 10.0; WOW64)..."
-        ]),
-        "Accept-Language": "en-US,en;q=0.9"
-    }
+async def check_username(username, retry=True, tried_proxies=None):
+    """
+    Checks username availability on TikTok.
 
-    proxy = get_next_proxy()
+    On HTTP 200 (taken), if retry=True, tries once more after a delay using a different proxy.
+
+    - tried_proxies: set of proxies used for this username, to avoid repeats on retry.
+    """
+    if tried_proxies is None:
+        tried_proxies = set()
+
+    proxy = get_next_proxy(exclude=tried_proxies)
     if not proxy:
         print("⚠️ No usable proxies")
         return False
 
+    tried_proxies.add(proxy)
     proxy_state[proxy]['last_used'] = asyncio.get_event_loop().time()
+
+    url = f"https://www.tiktok.com/@{username}"
+    headers = {
+        "User-Agent": random.choice([
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
+            "Mozilla/5.0 (Windows NT 10.0; WOW64; rv:102.0) Gecko/20100101 Firefox/102.0"
+        ]),
+        "Accept-Language": "en-US,en;q=0.9"
+    }
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, proxy=proxy, allow_redirects=False, timeout=10) as resp:
                 status = resp.status
-                print(f"🔍 {username} → HTTP {status}")
+                print(f"🔍 {username} → HTTP {status} via {proxy}")
 
                 if status == 404:
                     proxy_state[proxy]['fail_count'] = 0
-                    return True
+                    return True  # Available
+
                 elif status == 200:
+                    # Username taken
                     proxy_state[proxy]['fail_count'] = 0
-                    return False
+
+                    # Retry once with different proxy after a short wait
+                    if retry and len(tried_proxies) < len(PROXIES):
+                        print(f"🔁 Retry on HTTP 200 with a different proxy for @{username}...")
+                        await asyncio.sleep(random.uniform(3, 6))  # wait a few seconds before retry
+                        return await check_username(username, retry=False, tried_proxies=tried_proxies)
+                    else:
+                        return False
+
                 elif status in (301, 302):
                     proxy_state[proxy]['fail_count'] += 1
+
                 else:
                     proxy_state[proxy]['fail_count'] += 1
 
@@ -162,7 +201,7 @@ async def check_username(username, retry=True):
 
     if retry:
         await asyncio.sleep(5)
-        return await check_username(username, retry=False)
+        return await check_username(username, retry=False, tried_proxies=tried_proxies)
 
     return False
 
