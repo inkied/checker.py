@@ -1,255 +1,166 @@
-import os
 import asyncio
 import aiohttp
 import random
 import string
-from fastapi import FastAPI, Request
-import uvicorn
+import time
 
-app = FastAPI()
+# CONFIG - fill these with your actual tokens/IDs/keys
+TELEGRAM_BOT_TOKEN = "7698527405:AAE8z3q9epDTXZFZMNZRW9ilU-ayevMQKVA"
+TELEGRAM_CHAT_ID = "7755395640"
+WEBSHARE_API_KEY = "cmaqd2pxyf6h1bl93ozf7z12mm2efjsvbd7w366z"
 
-# --- Config from environment variables ---
-TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
-WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
-BOT_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-WEBHOOK_URL = "https://checkerpy-production-a7e1.up.railway.app/webhook"
+CHECK_CONCURRENCY = 30
+BATCH_SIZE = 5
+SAVE_FILE = "available_tiktok_usernames.txt"
 
-# --- State ---
-CHECKER_RUNNING = False
-PROXIES = []
-proxy_state = {}  # proxy -> {'fail_count': int, 'last_used': float}
+vowels = "aeiouy"
+consonants = "".join(c for c in string.ascii_lowercase if c not in vowels)
+digits = "0123456789"
 
-# --- Config ---
-MIN_REQUEST_INTERVAL = 2
-MAX_FAILS = 3
-
-def get_ready_proxies():
-    now = asyncio.get_event_loop().time()
-    return [p for p in PROXIES if (now - proxy_state[p]['last_used'] >= MIN_REQUEST_INTERVAL and proxy_state[p]['fail_count'] < MAX_FAILS)]
-
-def get_next_proxy(exclude=None):
-    """Get next ready proxy, optionally excluding some proxy or proxies"""
-    ready = get_ready_proxies()
-    if exclude:
-        if isinstance(exclude, str):
-            exclude = {exclude}
-        else:
-            exclude = set(exclude)
-        ready = [p for p in ready if p not in exclude]
-
-    if not ready:
-        now = asyncio.get_event_loop().time()
-        # Reset fail counts for proxies not used recently
-        for proxy in PROXIES:
-            state = proxy_state[proxy]
-            if now - state['last_used'] > MIN_REQUEST_INTERVAL * 5:
-                state['fail_count'] = 0
-        ready = [p for p in PROXIES if proxy_state[p]['fail_count'] < MAX_FAILS and (now - proxy_state[p]['last_used'] >= MIN_REQUEST_INTERVAL)]
-        if exclude:
-            ready = [p for p in ready if p not in exclude]
-        if not ready and PROXIES:
-            # last resort, pick any proxy excluding exclude list
-            candidates = [p for p in PROXIES if not exclude or p not in exclude]
-            if candidates:
-                return random.choice(candidates)
+# 1. Username generator (semi-OG + brandable)
+def semi_og_generator(n=500):
+    names = set()
+    while len(names) < n:
+        name_chars = []
+        for i in range(4):
+            if i % 2 == 0:
+                name_chars.append(random.choice(consonants))
             else:
-                return None
-        if not ready:
-            return None
-    return random.choice(ready)
+                name_chars.append(random.choice(vowels))
+        # 30% chance replace a char with digit
+        if random.random() < 0.3:
+            idx = random.randint(0, 3)
+            name_chars[idx] = random.choice(digits)
+        username = "".join(name_chars)
+        if max(username.count(ch) for ch in username) <= 2:
+            names.add(username)
+    return list(names)
 
-async def fetch_webshare_proxies():
-    global PROXIES, proxy_state
-    if not WEBSHARE_API_KEY:
-        print("❌ WEBSHARE_API_KEY not set.")
-        return
-
-    url = "https://proxy.webshare.io/api/proxy/list/"
+# 2. Proxy scraper from Webshare
+async def fetch_proxies(session):
+    url = f"https://proxy.webshare.io/api/proxy/list/?page_size=100"
     headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
-    params = {"page": 1, "type": "http", "last_check": 3600}
-
+    proxies = []
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as resp:
-                if resp.status != 200:
-                    print("❌ Proxy fetch failed:", resp.status)
-                    return
-                data = await resp.json()
-                proxies = []
-                for proxy in data.get("results", []):
-                    p = f"http://{proxy['username']}:{proxy['password']}@{proxy['proxy_address']}:{proxy['ports']['http']}" \
-                        if proxy.get("username") else f"http://{proxy['proxy_address']}:{proxy['ports']['http']}"
-                    proxies.append(p)
-                PROXIES = proxies
-                proxy_state = {p: {'fail_count': 0, 'last_used': 0} for p in PROXIES}
-                print(f"✅ Loaded {len(PROXIES)} proxies")
-    except Exception as e:
-        print(f"❌ Error fetching proxies: {e}")
+        async with session.get(url, headers=headers) as r:
+            data = await r.json()
+            for p in data.get("results", []):
+                proxies.append(f"http://{p['proxy_address']}:{p['ports']['http']}")
+    except:
+        pass
+    return proxies
 
-# --- Upgraded username generator with brandable + semi-OG patterns ---
-vowels = "aeiou"
-consonants = "bcdfghjklmnpqrstvwxyz"
-
-brandable_prefixes = [
-    "kur", "lok", "ruk", "vak", "tik", "zik", "buk", "cak", "dok", "fik",
-    "lak", "mok", "nak", "pak", "rak", "sak", "tak", "vak", "wak", "yuk"
-]
-
-brandable_suffixes = [
-    "y", "i", "o", "u", "a", "e"
-]
-
-semi_og_patterns = [
-    lambda: random.choice(consonants) + random.choice(vowels) + random.choice(consonants) + random.choice(vowels),
-    lambda: random.choice(consonants) + random.choice(consonants) + random.choice(vowels) + random.choice(consonants),
-    lambda: random.choice(consonants) + random.choice(vowels) + random.choice(vowels) + random.choice(consonants),
-    lambda: random.choice(consonants) + random.choice(vowels) + random.choice(consonants) + random.choice(consonants),
-    lambda: random.choice(consonants) * 2 + random.choice(vowels) + random.choice(consonants),
-]
-
-def generate_username():
-    choice = random.choices(
-        ["brandable", "semi_og", "random"], weights=[0.4, 0.4, 0.2], k=1
-    )[0]
-
-    if choice == "brandable":
-        prefix = random.choice(brandable_prefixes)
-        suffix = random.choice(brandable_suffixes)
-        username = (prefix + suffix)[:4]
-        return username
-
-    elif choice == "semi_og":
-        username = random.choice(semi_og_patterns)()
-        return username
-
-    else:
-        letters = consonants + vowels
-        return ''.join(random.choices(letters, k=4))
-
-async def send_message(text):
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-    async with aiohttp.ClientSession() as session:
-        await session.post(f"{BOT_API_URL}/sendMessage", json=data)
-
-async def check_username(username, retry=True, tried_proxies=None):
-    """
-    Checks username availability on TikTok.
-
-    On HTTP 200 (taken), if retry=True, tries once more after a delay using a different proxy.
-
-    - tried_proxies: set of proxies used for this username, to avoid repeats on retry.
-    """
-    if tried_proxies is None:
-        tried_proxies = set()
-
-    proxy = get_next_proxy(exclude=tried_proxies)
-    if not proxy:
-        print("⚠️ No usable proxies")
+# 3. Proxy validator (simple HTTP check)
+async def validate_proxy(session, proxy):
+    test_url = "https://www.tiktok.com"
+    try:
+        async with session.get(test_url, proxy=proxy, timeout=10) as r:
+            return r.status == 200
+    except:
         return False
 
-    tried_proxies.add(proxy)
-    proxy_state[proxy]['last_used'] = asyncio.get_event_loop().time()
-
+# 4. TikTok username availability check
+async def check_username(session, username, proxy=None):
     url = f"https://www.tiktok.com/@{username}"
     headers = {
-        "User-Agent": random.choice([
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
-            "Mozilla/5.0 (Windows NT 10.0; WOW64; rv:102.0) Gecko/20100101 Firefox/102.0"
-        ]),
-        "Accept-Language": "en-US,en;q=0.9"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "text/html,application/xhtml+xml",
     }
-
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, proxy=proxy, allow_redirects=False, timeout=10) as resp:
-                status = resp.status
-                print(f"🔍 {username} → HTTP {status} via {proxy}")
+        async with session.get(url, headers=headers, proxy=proxy, timeout=10) as r:
+            # 404 means username available
+            if r.status == 404:
+                return True
+            return False
+    except:
+        return False
 
-                if status == 404:
-                    proxy_state[proxy]['fail_count'] = 0
-                    return True  # Available
+# 5. Telegram send message batch
+async def send_telegram_message(session, messages):
+    text = "\n".join(messages)
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    try:
+        async with session.post(url, data=payload) as r:
+            return await r.json()
+    except:
+        return None
 
-                elif status == 200:
-                    # Username taken
-                    proxy_state[proxy]['fail_count'] = 0
+# 6. Worker tasks
+async def worker(queue, session, proxies):
+    available = []
+    while True:
+        username = await queue.get()
+        proxy = random.choice(proxies) if proxies else None
+        if proxy and not proxy.startswith("http"):
+            proxy = "http://" + proxy
+        is_available = await check_username(session, username, proxy)
+        if is_available:
+            print(f"[AVAILABLE] {username}")
+            available.append(username)
+            with open(SAVE_FILE, "a") as f:
+                f.write(username + "\n")
+            if len(available) >= BATCH_SIZE:
+                await send_telegram_message(session, available)
+                available.clear()
+        queue.task_done()
 
-                    # Retry once with different proxy after a short wait
-                    if retry and len(tried_proxies) < len(PROXIES):
-                        print(f"🔁 Retry on HTTP 200 with a different proxy for @{username}...")
-                        await asyncio.sleep(random.uniform(3, 6))  # wait a few seconds before retry
-                        return await check_username(username, retry=False, tried_proxies=tried_proxies)
-                    else:
-                        return False
+# 7. Telegram bot listener - /start command to trigger check
+async def telegram_listener():
+    offset = None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    while True:
+        try:
+            params = {"timeout": 30}
+            if offset:
+                params["offset"] = offset
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as r:
+                    data = await r.json()
+                    for update in data.get("result", []):
+                        offset = update["update_id"] + 1
+                        msg = update.get("message", {})
+                        text = msg.get("text", "")
+                        chat_id = msg.get("chat", {}).get("id", 0)
+                        if text == "/start" and str(chat_id) == TELEGRAM_CHAT_ID:
+                            print("Received /start command - starting checker")
+                            asyncio.create_task(run_checker())
+        except Exception as e:
+            print(f"Telegram listener error: {e}")
+        await asyncio.sleep(1)
 
-                elif status in (301, 302):
-                    proxy_state[proxy]['fail_count'] += 1
+# 8. Main checker logic called on /start command
+async def run_checker():
+    usernames = semi_og_generator(1000)
+    queue = asyncio.Queue()
+    for u in usernames:
+        queue.put_nowait(u)
 
-                else:
-                    proxy_state[proxy]['fail_count'] += 1
+    async with aiohttp.ClientSession() as session:
+        proxies = await fetch_proxies(session)
+        proxies = [p for p in proxies if await validate_proxy(session, p)]
+        print(f"Valid proxies: {len(proxies)}")
 
-    except Exception as e:
-        print(f"❌ Proxy error: {proxy} | {e}")
-        proxy_state[proxy]['fail_count'] += 1
+        tasks = []
+        for _ in range(CHECK_CONCURRENCY):
+            tasks.append(asyncio.create_task(worker(queue, session, proxies)))
 
-    if proxy_state[proxy]['fail_count'] >= MAX_FAILS:
-        if proxy in PROXIES:
-            PROXIES.remove(proxy)
-            proxy_state.pop(proxy)
-            print(f"❌ Removed bad proxy: {proxy}")
+        await queue.join()
+        for task in tasks:
+            task.cancel()
 
-    if retry:
-        await asyncio.sleep(5)
-        return await check_username(username, retry=False, tried_proxies=tried_proxies)
+        # Send remaining available usernames if any
+        if tasks:
+            # just a safety - though available cleared in worker
+            pass
 
-    return False
-
-async def run_checker_loop():
-    global CHECKER_RUNNING
-    CHECKER_RUNNING = True
-    await send_message("✅ Checker started")
-
-    while CHECKER_RUNNING:
-        if not PROXIES:
-            await send_message("⚠️ No proxies, trying to reload...")
-            await fetch_webshare_proxies()
-            await asyncio.sleep(5)
-            continue
-
-        username = generate_username()
-        available = await check_username(username)
-        if available:
-            await send_message(f"🎯 Available: <b>@{username}</b>")
-        await asyncio.sleep(random.uniform(0.7, 1.3))
-
-    await send_message("🛑 Checker stopped")
-
-# --- Telegram Webhook ---
-@app.post("/webhook")
-async def webhook(request: Request):
-    global CHECKER_RUNNING
-    data = await request.json()
-    print("📩 Webhook received:", data)
-
-    if "message" in data:
-        text = data["message"].get("text", "")
-        if text == "/start":
-            if not CHECKER_RUNNING:
-                asyncio.create_task(run_checker_loop())
-            else:
-                await send_message("🔁 Already running.")
-        elif text == "/stop":
-            CHECKER_RUNNING = False
-            await send_message("⛔ Checker stopped.")
-        else:
-            await send_message("❓ Use /start or /stop")
-
-    return {"ok": True}
-
-@app.on_event("startup")
-async def startup():
-    await fetch_webshare_proxies()
+async def main():
+    listener_task = asyncio.create_task(telegram_listener())
+    await listener_task
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    asyncio.run(main())
