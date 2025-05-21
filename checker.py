@@ -12,7 +12,7 @@ app = FastAPI()
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
-BOT_API_URL = f"https://api.telegram.org/bot7527264620:AAGG5qpYqV3o0h0NidwmsTOKxqVsmRIaX1A"
+BOT_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 WEBHOOK_URL = "https://checkerpy-production-a7e1.up.railway.app/webhook"
 
 # --- State ---
@@ -30,6 +30,10 @@ def get_next_proxy():
 
 async def fetch_webshare_proxies():
     global PROXIES
+    if not WEBSHARE_API_KEY:
+        print("❌ WEBSHARE_API_KEY not set in environment!")
+        return
+
     url = "https://proxy.webshare.io/api/proxy/list/"
     headers = {
         "Authorization": f"Token {WEBSHARE_API_KEY}"
@@ -39,18 +43,29 @@ async def fetch_webshare_proxies():
         "type": "http",
         "last_check": 3600
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, params=params) as resp:
-            data = await resp.json()
-            proxies = []
-            for proxy in data.get("results", []):
-                if proxy.get("username") and proxy.get("password"):
-                    p = f"http://{proxy['username']}:{proxy['password']}@{proxy['proxy_address']}:{proxy['ports']['http']}"
-                else:
-                    p = f"http://{proxy['proxy_address']}:{proxy['ports']['http']}"
-                proxies.append(p)
-            PROXIES = proxies
-            print(f"🌀 Fetched {len(PROXIES)} proxies from Webshare")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    print(f"❌ Failed to fetch proxies: HTTP {resp.status}")
+                    text = await resp.text()
+                    print("Response text:", text)
+                    return
+                data = await resp.json()
+                proxies = []
+                for proxy in data.get("results", []):
+                    if proxy.get("username") and proxy.get("password"):
+                        p = f"http://{proxy['username']}:{proxy['password']}@{proxy['proxy_address']}:{proxy['ports']['http']}"
+                    else:
+                        p = f"http://{proxy['proxy_address']}:{proxy['ports']['http']}"
+                    proxies.append(p)
+                PROXIES = proxies
+                print(f"🌀 Fetched {len(PROXIES)} proxies from Webshare")
+                if len(PROXIES) == 0:
+                    print("⚠️ No proxies available from Webshare response.")
+    except Exception as e:
+        print(f"❌ Exception during proxy fetch: {e}")
 
 def generate_username(length=4):
     return ''.join(random.choices(string.ascii_lowercase, k=length))
@@ -83,6 +98,7 @@ async def check_username(username):
         print(f"❌ Proxy error on {proxy}: {e}")
         if proxy in PROXIES:
             PROXIES.remove(proxy)
+            print(f"⚠️ Removed bad proxy: {proxy}. {len(PROXIES)} proxies left.")
         return False
 
 async def run_checker_loop():
@@ -91,6 +107,14 @@ async def run_checker_loop():
     print("✅ Checker started")
 
     while CHECKER_RUNNING:
+        if not PROXIES:
+            print("⚠️ Proxy list empty, fetching new proxies...")
+            await fetch_webshare_proxies()
+            if not PROXIES:
+                print("❌ Still no proxies available, sleeping 30 seconds before retry...")
+                await asyncio.sleep(30)
+                continue
+
         username = generate_username()
         print(f"🔍 Checking username: {username}")
 
@@ -138,6 +162,7 @@ async def root():
 
 @app.on_event("startup")
 async def startup_event():
+    print(f"Using Webshare API key (start): {WEBSHARE_API_KEY[:5]}...")  # Confirm key loaded
     await fetch_webshare_proxies()
     async with aiohttp.ClientSession() as session:
         set_url = f"{BOT_API_URL}/setWebhook"
