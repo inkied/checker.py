@@ -15,6 +15,8 @@ logging.basicConfig(level=logging.INFO)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Add your full public URL here with /webhook
+
 PROXY_API_URL = "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100"
 
 BASE_URL = "https://www.tiktok.com/@{}"
@@ -86,6 +88,25 @@ async def send_telegram(username):
             await session.post(url, json=payload)
         except Exception as e:
             logging.warning(f"Failed to send telegram message: {e}")
+
+async def set_telegram_webhook():
+    if not WEBHOOK_URL:
+        logging.warning("WEBHOOK_URL env var not set. Cannot set Telegram webhook.")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    payload = {"url": WEBHOOK_URL}
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, json=payload) as resp:
+                data = await resp.json()
+                if data.get("ok"):
+                    logging.info(f"Telegram webhook set to {WEBHOOK_URL}")
+                else:
+                    logging.error(f"Failed to set Telegram webhook: {data}")
+        except Exception as e:
+            logging.error(f"Exception while setting Telegram webhook: {e}")
 
 # --- PROXIES ---
 async def fetch_proxies():
@@ -181,6 +202,8 @@ async def handle_webhook(request: Request):
 # --- MAIN ---
 async def main():
     await fetch_proxies()
+    await set_telegram_webhook()  # <-- Auto register Telegram webhook here
+
     config = Config(app=app, host="0.0.0.0", port=8080, log_level="info")
     server = Server(config)
     await server.serve()
