@@ -3,15 +3,12 @@ import asyncio
 import aiohttp
 from fastapi import FastAPI, Request
 import uvicorn
-from dotenv import load_dotenv
-
-load_dotenv()  # Loads variables from a .env file if present
 
 app = FastAPI()
 
-# --- Config ---
-TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")  # Get from env vars
-TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")  # Get from env vars
+# --- Config from environment variables ---
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
 BOT_API_URL = f"https://api.telegram.org/bot7527264620:AAGG5qpYqV3o0h0NidwmsTOKxqVsmRIaX1A"
 
 # --- State ---
