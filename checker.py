@@ -17,7 +17,19 @@ vowels = "aeiouy"
 consonants = "".join(c for c in string.ascii_lowercase if c not in vowels)
 digits = "0123456789"
 
-# 1. Username generator (semi-OG + brandable)
+BANNED_PATTERNS = [
+    "admin", "support", "staff", "mod", "test", "null", "undefined",
+    "sys", "root", "system", "operator", "owner", "manager"
+]
+
+def contains_banned_pattern(name):
+    name_lower = name.lower()
+    for pattern in BANNED_PATTERNS:
+        if pattern in name_lower:
+            return True
+    return False
+
+# Username generator (semi-OG + brandable)
 def semi_og_generator(n=500):
     names = set()
     while len(names) < n:
@@ -32,11 +44,11 @@ def semi_og_generator(n=500):
             idx = random.randint(0, 3)
             name_chars[idx] = random.choice(digits)
         username = "".join(name_chars)
-        if max(username.count(ch) for ch in username) <= 2:
+        if max(username.count(ch) for ch in username) <= 2 and not contains_banned_pattern(username):
             names.add(username)
     return list(names)
 
-# 2. Proxy scraper from Webshare
+# Proxy scraper from Webshare
 async def fetch_proxies(session):
     url = f"https://proxy.webshare.io/api/proxy/list/?page_size=100"
     headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
@@ -45,21 +57,22 @@ async def fetch_proxies(session):
         async with session.get(url, headers=headers) as r:
             data = await r.json()
             for p in data.get("results", []):
-                proxies.append(f"http://{p['proxy_address']}:{p['ports']['http']}")
-    except:
-        pass
+                proxy = f"http://{p['proxy_address']}:{p['ports']['http']}"
+                proxies.append(proxy)
+    except Exception as e:
+        print(f"Proxy fetch error: {e}")
     return proxies
 
-# 3. Proxy validator (simple HTTP check)
+# Proxy validator
 async def validate_proxy(session, proxy):
     test_url = "https://www.tiktok.com"
     try:
-        async with session.get(test_url, proxy=proxy, timeout=10) as r:
+        async with session.head(test_url, proxy=proxy, timeout=7) as r:
             return r.status == 200
     except:
         return False
 
-# 4. TikTok username availability check
+# Check username availability - HEAD request with banned detection
 async def check_username(session, username, proxy=None):
     url = f"https://www.tiktok.com/@{username}"
     headers = {
@@ -67,16 +80,22 @@ async def check_username(session, username, proxy=None):
         "Accept": "text/html,application/xhtml+xml",
     }
     try:
-        async with session.get(url, headers=headers, proxy=proxy, timeout=10) as r:
-            # 404 means username available
+        async with session.head(url, headers=headers, proxy=proxy, timeout=7) as r:
             if r.status == 404:
                 return True
+            if r.status == 200:
+                return False
+            if r.status in [403, 429]:
+                # Treat as banned or rate limited (skip)
+                return False
             return False
     except:
         return False
 
-# 5. Telegram send message batch
+# Send batch Telegram message
 async def send_telegram_message(session, messages):
+    if not messages:
+        return
     text = "\n".join(messages)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -87,10 +106,11 @@ async def send_telegram_message(session, messages):
     try:
         async with session.post(url, data=payload) as r:
             return await r.json()
-    except:
+    except Exception as e:
+        print(f"Telegram send error: {e}")
         return None
 
-# 6. Worker tasks
+# Worker
 async def worker(queue, session, proxies):
     available = []
     while True:
@@ -108,8 +128,10 @@ async def worker(queue, session, proxies):
                 await send_telegram_message(session, available)
                 available.clear()
         queue.task_done()
+        # Small delay to reduce rate limit risk
+        await asyncio.sleep(random.uniform(0.1, 0.4))
 
-# 7. Telegram bot listener - /start command to trigger check
+# Telegram listener for /start
 async def telegram_listener():
     offset = None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -125,15 +147,15 @@ async def telegram_listener():
                         offset = update["update_id"] + 1
                         msg = update.get("message", {})
                         text = msg.get("text", "")
-                        chat_id = msg.get("chat", {}).get("id", 0)
-                        if text == "/start" and str(chat_id) == TELEGRAM_CHAT_ID:
+                        chat_id = str(msg.get("chat", {}).get("id", ""))
+                        if text == "/start" and chat_id == TELEGRAM_CHAT_ID:
                             print("Received /start command - starting checker")
                             asyncio.create_task(run_checker())
         except Exception as e:
             print(f"Telegram listener error: {e}")
         await asyncio.sleep(1)
 
-# 8. Main checker logic called on /start command
+# Main checker function
 async def run_checker():
     usernames = semi_og_generator(1000)
     queue = asyncio.Queue()
@@ -142,21 +164,22 @@ async def run_checker():
 
     async with aiohttp.ClientSession() as session:
         proxies = await fetch_proxies(session)
-        proxies = [p for p in proxies if await validate_proxy(session, p)]
-        print(f"Valid proxies: {len(proxies)}")
+        # Validate proxies concurrently
+        valid_proxies = []
+        tasks = [validate_proxy(session, proxy) for proxy in proxies]
+        results = await asyncio.gather(*tasks)
+        for proxy, valid in zip(proxies, results):
+            if valid:
+                valid_proxies.append(proxy)
+        print(f"Valid proxies: {len(valid_proxies)}")
 
         tasks = []
         for _ in range(CHECK_CONCURRENCY):
-            tasks.append(asyncio.create_task(worker(queue, session, proxies)))
+            tasks.append(asyncio.create_task(worker(queue, session, valid_proxies)))
 
         await queue.join()
         for task in tasks:
             task.cancel()
-
-        # Send remaining available usernames if any
-        if tasks:
-            # just a safety - though available cleared in worker
-            pass
 
 async def main():
     listener_task = asyncio.create_task(telegram_listener())
