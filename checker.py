@@ -2,7 +2,7 @@ import asyncio
 import aiohttp
 import random
 import string
-import time
+from fastapi import FastAPI, BackgroundTasks
 
 # CONFIG - fill these with your actual tokens/IDs/keys
 TELEGRAM_BOT_TOKEN = "7698527405:AAE8z3q9epDTXZFZMNZRW9ilU-ayevMQKVA"
@@ -131,30 +131,6 @@ async def worker(queue, session, proxies):
         # Small delay to reduce rate limit risk
         await asyncio.sleep(random.uniform(0.1, 0.4))
 
-# Telegram listener for /start
-async def telegram_listener():
-    offset = None
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    while True:
-        try:
-            params = {"timeout": 30}
-            if offset:
-                params["offset"] = offset
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params) as r:
-                    data = await r.json()
-                    for update in data.get("result", []):
-                        offset = update["update_id"] + 1
-                        msg = update.get("message", {})
-                        text = msg.get("text", "")
-                        chat_id = str(msg.get("chat", {}).get("id", ""))
-                        if text == "/start" and chat_id == TELEGRAM_CHAT_ID:
-                            print("Received /start command - starting checker")
-                            asyncio.create_task(run_checker())
-        except Exception as e:
-            print(f"Telegram listener error: {e}")
-        await asyncio.sleep(1)
-
 # Main checker function
 async def run_checker():
     usernames = semi_og_generator(1000)
@@ -181,9 +157,17 @@ async def run_checker():
         for task in tasks:
             task.cancel()
 
-async def main():
-    listener_task = asyncio.create_task(telegram_listener())
-    await listener_task
+# ========== FastAPI App ==========
 
-if __name__ == "__main__":
-    asyncio.run(main())
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "TikTok checker API running"}
+
+@app.post("/start_checker")
+async def start_checker(background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_checker)
+    return {"message": "Checker started in background"}
+
+# Optional: You can add more endpoints to control checker (e.g., stop, status, etc.)
