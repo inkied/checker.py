@@ -1,6 +1,6 @@
 import asyncio
 import aiohttp
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 import logging
 import random
 from time import time
@@ -10,7 +10,7 @@ app = FastAPI()
 # === CONFIG ===
 TELEGRAM_TOKEN = "7698527405:AAE8z3q9epDTXZFZMNZRW9ilU-ayevMQKVA"
 TELEGRAM_CHAT_ID = "7755395640"
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+TELEGRAM_API = f"https://api.telegram.org/botAAE8z3q9epDTXZFZMNZRW9ilU-ayevMQKVA"
 WEB_SHARE_API_KEY = "cmaqd2pxyf6h1bl93ozf7z12mm2efjsvbd7w366z"
 WEB_SHARE_API_URL = "https://proxy.webshare.io/api/proxy/list/?page=1&page_size=100&protocol=http,https,socks4,socks5"
 
@@ -81,6 +81,10 @@ async def telegram_webhook(request: Request):
     except Exception as e:
         logging.error(f"Webhook error: {e}")
         return {"ok": False, "error": str(e)}
+
+@app.get("/webhook")
+async def webhook_get():
+    raise HTTPException(status_code=405, detail="GET method not allowed on /webhook")
 
 async def send_message(chat_id, text):
     async with aiohttp.ClientSession() as session:
@@ -226,3 +230,6 @@ async def run_checker(chat_id: int):
                         if proxy_dict["fails"] >= PROXY_MAX_FAILS:
                             proxy_dict["cooldown_until"] = time() + PROXY_COOLDOWN
                             logging.info(f"Proxy {proxy_dict['proxy']} cooldown for {PROXY_COOLDOWN}s due to repeated fails.")
+                            proxy_dict["fails"] = 0
+
+            await asyncio.sleep(random.uniform(0.4, 1.2))  # small delay for stealth
