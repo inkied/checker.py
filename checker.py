@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
+# Load sensitive info from environment or placeholders
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "your_telegram_token_here"
 TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID") or "your_chat_id_here")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY") or "your_webshare_api_key_here"
@@ -226,5 +227,35 @@ async def telegram_webhook(req: Request):
 
         if data_text.startswith("claim:"):
             username = data_text.split("claim:")[1]
-            # You can add your claim logic here
+            # Placeholder for claim logic
             await send_telegram(f"User {user_id} claimed username: {username}")
+        elif data_text.startswith("skip:"):
+            username = data_text.split("skip:")[1]
+            await send_telegram(f"User {user_id} skipped username: {username}")
+
+    return JSONResponse(content={"ok": True})
+
+# --- Command endpoints for start/stop ---
+@app.post("/start")
+async def start_checker():
+    global checking_active
+    if checking_active:
+        return {"status": "already running"}
+    checking_active = True
+    asyncio.create_task(checker_loop())
+    return {"status": "checker started"}
+
+@app.post("/stop")
+async def stop_checker():
+    global checking_active
+    checking_active = False
+    return {"status": "checker stopping"}
+
+# --- Run Uvicorn (only when running as main) ---
+if __name__ == "__main__":
+    import uvicorn
+    import traceback
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    except Exception:
+        traceback.print_exc()
