@@ -15,11 +15,10 @@ logging.basicConfig(level=logging.INFO)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Add your full public URL here with /webhook
-
 PROXY_API_URL = "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100"
-
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 BASE_URL = "https://www.tiktok.com/@{}"
+
 HEADERS_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
@@ -29,7 +28,7 @@ proxy_pool = asyncio.Queue()
 checking_active = False
 available_usernames = set()
 username_wordlists = []
-MAX_USERNAME_SOURCES = 2  # limit how many wordlists we load to control memory
+MAX_USERNAME_SOURCES = 2
 
 app = FastAPI()
 
@@ -88,25 +87,6 @@ async def send_telegram(username):
             await session.post(url, json=payload)
         except Exception as e:
             logging.warning(f"Failed to send telegram message: {e}")
-
-async def set_telegram_webhook():
-    if not WEBHOOK_URL:
-        logging.warning("WEBHOOK_URL env var not set. Cannot set Telegram webhook.")
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
-    payload = {"url": WEBHOOK_URL}
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, json=payload) as resp:
-                data = await resp.json()
-                if data.get("ok"):
-                    logging.info(f"Telegram webhook set to {WEBHOOK_URL}")
-                else:
-                    logging.error(f"Failed to set Telegram webhook: {data}")
-        except Exception as e:
-            logging.error(f"Exception while setting Telegram webhook: {e}")
 
 # --- PROXIES ---
 async def fetch_proxies():
@@ -202,9 +182,25 @@ async def handle_webhook(request: Request):
 # --- MAIN ---
 async def main():
     await fetch_proxies()
-    await set_telegram_webhook()  # <-- Auto register Telegram webhook here
 
-    config = Config(app=app, host="0.0.0.0", port=8080, log_level="info")
+    port = int(os.getenv("PORT", 8000))
+    
+    # Auto-set Telegram webhook
+    if WEBHOOK_URL:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+            payload = {"url": WEBHOOK_URL}
+            try:
+                async with session.post(url, json=payload) as resp:
+                    result = await resp.json()
+                    if result.get("ok"):
+                        logging.info(f"[INFO] Webhook set to {WEBHOOK_URL}")
+                    else:
+                        logging.warning(f"[WARN] Failed to set webhook: {result}")
+            except Exception as e:
+                logging.warning(f"[ERROR] Exception while setting webhook: {e}")
+
+    config = Config(app=app, host="0.0.0.0", port=port, log_level="info")
     server = Server(config)
     await server.serve()
 
