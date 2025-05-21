@@ -3,6 +3,7 @@ import asyncio
 import aiohttp
 import random
 import string
+import time
 from fastapi import FastAPI, Request
 import uvicorn
 
@@ -19,6 +20,8 @@ WEBHOOK_URL = "https://checkerpy-production-a7e1.up.railway.app/webhook"
 CHECKER_RUNNING = False
 PROXIES = []
 proxy_index = 0
+
+PROXY_REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
 
 def get_next_proxy():
     global proxy_index
@@ -113,42 +116,35 @@ async def check_username(username):
             print(f"⚠️ Removed bad proxy: {proxy}. {len(PROXIES)} proxies left.")
         return False
 
-CONCURRENT_CHECKS = 5  # Moderate concurrency
-
-async def check_username_task(username, semaphore):
-    async with semaphore:
-        return username, await check_username(username)
-
 async def run_checker_loop():
     global CHECKER_RUNNING
     CHECKER_RUNNING = True
     print("✅ Checker started")
 
-    semaphore = asyncio.Semaphore(CONCURRENT_CHECKS)
+    last_proxy_refresh = time.time()
 
     while CHECKER_RUNNING:
-        if not PROXIES:
-            print("⚠️ Proxy list empty, fetching new proxies...")
+        # Refresh proxies every 15 minutes or if fewer than 20 proxies remain
+        if time.time() - last_proxy_refresh > PROXY_REFRESH_INTERVAL or len(PROXIES) < 20:
+            print("🌀 Refreshing proxies...")
             await fetch_webshare_proxies()
+            last_proxy_refresh = time.time()
             if not PROXIES:
-                print("❌ Still no proxies available, sleeping 30 seconds before retry...")
+                print("❌ No proxies after refresh, sleeping 30 seconds...")
                 await asyncio.sleep(30)
                 continue
 
-        usernames = [generate_username() for _ in range(CONCURRENT_CHECKS)]
-        print(f"🔍 Checking usernames: {', '.join(usernames)}")
+        username = generate_username()
+        print(f"🔍 Checking username: {username}")
 
-        tasks = [check_username_task(u, semaphore) for u in usernames]
-        results = await asyncio.gather(*tasks)
+        available = await check_username(username)
+        if available:
+            print(f"🎯 Sending alert: {username} is available")
+            await send_message(f"Username <b>@{username}</b> is available!")
+        else:
+            print(f"⛔ {username} is taken or check failed")
 
-        for username, available in results:
-            if available:
-                print(f"🎯 Sending alert: {username} is available")
-                await send_message(f"Username <b>@{username}</b> is available!")
-            else:
-                print(f"⛔ {username} is taken or check failed")
-
-        await asyncio.sleep(1)
+        await asyncio.sleep(1)  # moderate delay, not too fast
 
     CHECKER_RUNNING = False
     print("🛑 Checker stopped")
