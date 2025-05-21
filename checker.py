@@ -68,6 +68,9 @@ async def webhook(request: Request):
     return {"ok": True}
 
 if __name__ == "__main__":
+    print("Environment variables:")
+    for key, value in os.environ.items():
+        print(f"{key}={value}")
     port = int(os.environ.get("PORT", 8000))
-    print(f"Starting server on port: {port}")  # <-- This log confirms port Railway uses
+    print(f"Starting server on port: {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
