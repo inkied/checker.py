@@ -1,14 +1,11 @@
-import aiohttp
-import asyncio
-import os
-import random
-import logging
+# [Unchanged imports and initial config]
+import aiohttp, asyncio, os, random, logging
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from uvicorn import Config, Server
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -29,6 +26,7 @@ checking_active = False
 available_usernames = set()
 username_wordlists = []
 MAX_USERNAME_SOURCES = 2
+MIN_PROXY_THRESHOLD = 10  # If below this, refetch proxies
 
 app = FastAPI()
 
@@ -51,8 +49,7 @@ async def fetch_username_list(session, url):
             if resp.status == 200:
                 text = await resp.text()
                 lines = [line.strip().lower() for line in text.splitlines() if 3 < len(line.strip()) <= 4]
-                random.shuffle(lines)
-                return lines
+                return random.sample(lines, min(250, len(lines)))
     except Exception as e:
         logging.warning(f"Failed to fetch username list from {url}: {e}")
     return []
@@ -61,9 +58,8 @@ async def gather_usernames():
     usernames = []
     async with aiohttp.ClientSession() as session:
         for url in USERNAME_SOURCES[:MAX_USERNAME_SOURCES]:
-            lines = await fetch_username_list(session, url)
-            usernames.extend(lines)
-    usernames.extend(load_usernames_from_file("wordlist.txt"))
+            usernames += await fetch_username_list(session, url)
+    usernames += load_usernames_from_file("wordlist.txt")
     random.shuffle(usernames)
     return usernames
 
@@ -74,34 +70,28 @@ def generate_username():
     return ''.join(random.choice(vowels if c == "V" else consonants) for c in pattern)
 
 async def send_telegram(text):
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": True,
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
     async with aiohttp.ClientSession() as session:
         try:
             await session.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
         except Exception as e:
-            logging.warning(f"Failed to send telegram message: {e}")
+            logging.warning(f"Telegram error: {e}")
 
 async def fetch_proxies():
-    logging.info("Grabbing proxies from WebShare...")
-    await send_telegram("🌀 Grabbing proxies from WebShare...")
+    logging.info("🔁 Grabbing proxies from WebShare...")
+    await send_telegram("🔁 Grabbing proxies from WebShare...")
     headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(PROXY_API_URL, headers=headers, timeout=10) as response:
                 data = await response.json()
-                raw_proxies = [
-                    f"{item['proxy_address']}:{item['ports']['http']}"
-                    for item in data.get("results", [])
-                ]
+                raw_proxies = [f"{item['proxy_address']}:{item['ports']['http']}" for item in data.get("results", [])]
                 valid = await validate_proxies(raw_proxies)
                 for proxy in valid:
                     await proxy_pool.put(proxy)
-                logging.info(f"{len(valid)} proxies are working.")
-                await send_telegram(f"✅ {len(valid)} proxies are working.")
+                msg = f"✅ {len(valid)} working proxies loaded."
+                logging.info(msg)
+                await send_telegram(msg)
         except Exception as e:
             logging.error(f"[ERROR] Failed to fetch proxies: {e}")
 
@@ -121,13 +111,12 @@ async def validate_proxies(proxies):
 async def check_username(session, proxy, username):
     proxy_url = f"http://{proxy}"
     headers = {"User-Agent": random.choice(HEADERS_LIST)}
-
     try:
         async with session.get(BASE_URL.format(username), proxy=proxy_url, headers=headers, timeout=10) as resp:
             if resp.status == 404:
                 if username not in available_usernames:
-                    logging.info(f"[AVAILABLE] @{username}")
                     available_usernames.add(username)
+                    logging.info(f"[AVAILABLE] @{username}")
                     await send_telegram(f"✅ Available TikTok: @{username}")
             elif resp.status in (429, 403):
                 await asyncio.sleep(5)
@@ -144,12 +133,17 @@ async def checker_loop():
 
     async with aiohttp.ClientSession(connector=connector) as session:
         while checking_active:
-            if proxy_pool.empty():
-                logging.info("[INFO] Proxy pool empty, refetching...")
+            if proxy_pool.qsize() < MIN_PROXY_THRESHOLD:
+                logging.info("[INFO] Proxy pool low, refetching...")
                 await fetch_proxies()
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
                 continue
-            username = username_wordlists.pop() if username_wordlists else generate_username()
+
+            username = (
+                username_wordlists.pop()
+                if username_wordlists else generate_username()
+            )
+
             proxy = await proxy_pool.get()
             asyncio.create_task(check_username(session, proxy, username))
             await asyncio.sleep(random.uniform(0.4, 0.9))
@@ -177,17 +171,18 @@ async def handle_webhook(request: Request):
 
     return JSONResponse({"status": "OK"})
 
-@app.on_event("startup")
-async def startup_event():
-    await set_webhook()
-    await send_telegram("✅ Checker is online.")
-    await fetch_proxies()
-
 async def set_webhook():
     payload = {"url": WEBHOOK_URL}
     async with aiohttp.ClientSession() as session:
         await session.post(f"{TELEGRAM_API_URL}/setWebhook", json=payload)
 
+async def main():
+    await set_webhook()
+    await send_telegram("✅ Checker is online.")
+    await fetch_proxies()
+    config = Config(app=app, host="0.0.0.0", port=8000, log_level="info")
+    server = Server(config)
+    await server.serve()
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    asyncio.run(main())
