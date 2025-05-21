@@ -9,7 +9,7 @@ app = FastAPI()
 # --- Config from environment variables ---
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
-BOT_API_URL = f"https://api.telegram.org/bot7527264620:AAGG5qpYqV3o0h0NidwmsTOKxqVsmRIaX1A"
+BOT_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # --- State ---
 CHECKER_RUNNING = False
@@ -69,4 +69,5 @@ async def webhook(request: Request):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
+    print(f"Starting server on port: {port}")  # <-- This log confirms port Railway uses
     uvicorn.run(app, host="0.0.0.0", port=port)
