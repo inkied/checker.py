@@ -9,7 +9,6 @@ from fastapi.responses import JSONResponse
 from uvicorn import Config, Server
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -95,41 +94,30 @@ async def fetch_proxies():
         try:
             async with session.get(PROXY_API_URL, headers=headers, timeout=10) as response:
                 if response.status != 200:
-                    logging.error(f"[ERROR] Webshare API responded with status {response.status}")
                     await send_telegram(f"❌ Webshare API error: status {response.status}")
                     return
 
                 data = await response.json()
-                logging.info(f"Webshare response: {data}")
+                proxies = []
 
-                if "results" not in data or not data["results"]:
-                    logging.error("[ERROR] No proxies found in Webshare API response.")
-                    await send_telegram("❌ No proxies found from Webshare API.")
-                    return
+                for item in data.get("results", []):
+                    ip = item.get("proxy_address")
+                    ports = item.get("ports", {})
+                    port = ports.get("http") or ports.get("socks5") or ports.get("socks4")
+                    if ip and port:
+                        proxies.append(f"{ip}:{port}")
 
-                raw_proxies = []
-                for item in data["results"]:
-                    try:
-                        proxy_address = item.get("proxy_address")
-                        ports = item.get("ports", {})
-                        http_port = ports.get("http")
-                        if proxy_address and http_port:
-                            raw_proxies.append(f"{proxy_address}:{http_port}")
-                    except Exception as e:
-                        logging.warning(f"Failed to parse a proxy entry: {e}")
-
-                if not raw_proxies:
-                    logging.error("[ERROR] No valid proxies extracted from Webshare API response.")
+                if not proxies:
                     await send_telegram("❌ No valid proxies extracted from Webshare API.")
                     return
 
-                valid = await validate_proxies(raw_proxies)
-                for proxy in valid:
-                    await proxy_pool.put(proxy)
+                valid = await validate_proxies(proxies)
+                for p in valid:
+                    await proxy_pool.put(p)
+
                 logging.info(f"{len(valid)} proxies are working.")
                 await send_telegram(f"✅ {len(valid)} proxies are working.")
         except Exception as e:
-            logging.error(f"[ERROR] Failed to fetch proxies: {e}")
             await send_telegram(f"❌ Exception during proxy fetch: {e}")
 
 async def validate_proxies(proxies):
@@ -141,9 +129,10 @@ async def validate_proxies(proxies):
                     return proxy
         except:
             return None
+
     tasks = [test(p) for p in proxies]
     results = await asyncio.gather(*tasks)
-    return [p for p in results if p]
+    return [r for r in results if r]
 
 async def release_proxy_after_cooldown(proxy):
     await asyncio.sleep(COOLDOWN_SECONDS)
@@ -155,14 +144,12 @@ async def check_username(session, proxy, username):
 
     try:
         async with session.get(BASE_URL.format(username), proxy=proxy_url, headers=headers, timeout=10) as resp:
-            if resp.status == 404:
-                if username not in available_usernames:
-                    logging.info(f"[AVAILABLE] @{username}")
-                    available_usernames.add(username)
-                    await send_telegram(f"✅ Available TikTok: @{username}")
+            if resp.status == 404 and username not in available_usernames:
+                available_usernames.add(username)
+                await send_telegram(f"✅ Available TikTok: @{username}")
             elif resp.status in (429, 403):
                 await asyncio.sleep(5)
-    except Exception:
+    except:
         pass
     finally:
         asyncio.create_task(release_proxy_after_cooldown(proxy))
@@ -175,7 +162,6 @@ async def checker_loop():
     async with aiohttp.ClientSession(connector=connector) as session:
         while checking_active:
             if proxy_pool.empty():
-                logging.info("[INFO] Proxy pool empty, refetching...")
                 await fetch_proxies()
                 await asyncio.sleep(3)
                 continue
@@ -195,23 +181,15 @@ async def handle_webhook(request: Request):
     if chat_id != TELEGRAM_CHAT_ID:
         return JSONResponse({"error": "Unauthorized"}, status_code=status.HTTP_403_FORBIDDEN)
 
-    if text == "/start":
-        if not checking_active:
-            checking_active = True
-            asyncio.create_task(checker_loop())
-            await send_telegram("🟢 Checker started.")
-            return JSONResponse({"status": "Started checking usernames."})
-        else:
-            await send_telegram("⚠️ Checker is already running.")
-            return JSONResponse({"status": "Already running."})
+    if text == "/start" and not checking_active:
+        checking_active = True
+        asyncio.create_task(checker_loop())
+        return JSONResponse({"status": "Started checking usernames."})
 
-    elif text == "/stop":
-        if checking_active:
-            checking_active = False
-            await send_telegram("🔴 Checker stopped.")
-            return JSONResponse({"status": "Stopped checking."})
-        else:
-            return JSONResponse({"status": "Checker not running."})
+    elif text == "/stop" and checking_active:
+        checking_active = False
+        await send_telegram("🔴 Checker stopped.")
+        return JSONResponse({"status": "Stopped checking."})
 
     return JSONResponse({"status": "OK"})
 
