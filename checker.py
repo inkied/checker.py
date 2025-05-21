@@ -212,7 +212,7 @@ async def telegram_webhook(request: Request):
 
     global checker_task
 
-    if text == "/startchecker":
+        if text in ("/start", "/startchecker"):
         if checking_active:
             await send_telegram("⚠️ Checker already running.")
         else:
@@ -221,7 +221,7 @@ async def telegram_webhook(request: Request):
             await send_telegram("🟢 Checker started by command.")
         return JSONResponse({"status": "checker started"})
 
-    if text == "/stopchecker":
+    if text in ("/stop", "/stopchecker"):
         if checking_active:
             checking_active = False
             await send_telegram("⏹️ Checker stopping...")
