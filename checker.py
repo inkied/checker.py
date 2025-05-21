@@ -30,6 +30,7 @@ checking_active = False
 available_usernames = set()
 username_wordlists = []
 MAX_USERNAME_SOURCES = 2
+COOLDOWN_SECONDS = 10  # Proxy cooldown to prevent overuse
 
 app = FastAPI()
 
@@ -144,6 +145,10 @@ async def validate_proxies(proxies):
     results = await asyncio.gather(*tasks)
     return [p for p in results if p]
 
+async def release_proxy_after_cooldown(proxy):
+    await asyncio.sleep(COOLDOWN_SECONDS)
+    await proxy_pool.put(proxy)
+
 async def check_username(session, proxy, username):
     proxy_url = f"http://{proxy}"
     headers = {"User-Agent": random.choice(HEADERS_LIST)}
@@ -160,8 +165,7 @@ async def check_username(session, proxy, username):
     except Exception:
         pass
     finally:
-        await asyncio.sleep(random.uniform(1.5, 3.5))
-        await proxy_pool.put(proxy)
+        asyncio.create_task(release_proxy_after_cooldown(proxy))
 
 async def checker_loop():
     global checking_active, username_wordlists
@@ -178,7 +182,7 @@ async def checker_loop():
             username = username_wordlists.pop() if username_wordlists else generate_username()
             proxy = await proxy_pool.get()
             asyncio.create_task(check_username(session, proxy, username))
-            await asyncio.sleep(random.uniform(0.4, 0.9))
+            await asyncio.sleep(random.uniform(0.1, 0.3))  # dispatch quickly for throughput
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
