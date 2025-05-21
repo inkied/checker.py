@@ -1,14 +1,12 @@
 from fastapi import FastAPI, Request
 import aiohttp
-import os
-import asyncio
 
 app = FastAPI()
 
 # Your Telegram Bot credentials
 TELEGRAM_TOKEN = "7698527405:AAE8z3q9epDTXZFZMNZRW9ilU-ayevMQKVA"
 TELEGRAM_CHAT_ID = "7755395640"
-TELEGRAM_API = f"https://api.telegram.org/bot7698527405:AAE8z3q9epDTXZFZMNZRW9ilU-ayevMQKVA"
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # ========== ROUTES ==========
 
@@ -45,9 +43,3 @@ async def send_message(chat_id, text):
             "chat_id": chat_id,
             "text": text
         })
-
-# ========== RUN ==========
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("checker:app", host="0.0.0.0", port=8000)
