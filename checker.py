@@ -77,13 +77,13 @@ async def check_username(session, username, proxy=None):
     except:
         return False
 
-async def send_telegram_message(session, messages):
+async def send_telegram_message(session, messages, chat_id=TELEGRAM_CHAT_ID):
     if not messages:
         return
     text = "\n".join(messages)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
         "parse_mode": "Markdown"
     }
@@ -171,7 +171,13 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         chat_id = message["chat"]["id"]
 
         if message.get("text") == "/start":
+            # Send inline buttons
             await send_inline_buttons(chat_id)
+            # Start checker in background
+            background_tasks.add_task(run_checker)
+            # Send confirmation message
+            async with aiohttp.ClientSession() as session:
+                await send_telegram_message(session, ["✅ TikTok checker started."], chat_id)
 
     elif "callback_query" in data:
         query = data["callback_query"]
@@ -181,9 +187,9 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         if command == "start":
             background_tasks.add_task(run_checker)
             async with aiohttp.ClientSession() as session:
-                await send_telegram_message(session, ["✅ TikTok checker started."])
+                await send_telegram_message(session, ["✅ TikTok checker started."], chat_id)
         elif command == "stop":
             async with aiohttp.ClientSession() as session:
-                await send_telegram_message(session, ["⛔ Stop not implemented yet."])
+                await send_telegram_message(session, ["⛔ Stop not implemented yet."], chat_id)
 
     return {"ok": True}
