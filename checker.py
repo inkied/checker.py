@@ -67,6 +67,14 @@ async def webhook(request: Request):
 
     return {"ok": True}
 
+@app.post("/webhook")
+async def webhook(request: Request):
+    # ... your existing webhook code ...
+
+@app.get("/")
+async def root():
+    return {"status": "running"}
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"Starting server on port: {port}")
