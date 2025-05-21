@@ -15,10 +15,11 @@ logging.basicConfig(level=logging.INFO)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
-PROXY_API_URL = "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-BASE_URL = "https://www.tiktok.com/@{}"
 
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+WEBHOOK_URL = f"https://checkerpy-production-a7e1.up.railway.app/webhook"
+PROXY_API_URL = "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100"
+BASE_URL = "https://www.tiktok.com/@{}"
 HEADERS_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
@@ -32,7 +33,6 @@ MAX_USERNAME_SOURCES = 2
 
 app = FastAPI()
 
-# --- USERNAME SOURCES ---
 def load_usernames_from_file(filename):
     if os.path.exists(filename):
         with open(filename, "r") as f:
@@ -74,22 +74,21 @@ def generate_username():
     pattern = random.choice(["CVCV", "CVVC", "VCCV", "CCVV"])
     return ''.join(random.choice(vowels if c == "V" else consonants) for c in pattern)
 
-# --- TELEGRAM ---
-async def send_telegram(username):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+async def send_telegram(text):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": f"✅ Available TikTok: @{username}",
+        "text": text,
         "disable_web_page_preview": True,
     }
     async with aiohttp.ClientSession() as session:
         try:
-            await session.post(url, json=payload)
+            await session.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
         except Exception as e:
             logging.warning(f"Failed to send telegram message: {e}")
 
-# --- PROXIES ---
 async def fetch_proxies():
+    logging.info("Grabbing proxies from WebShare...")
+    await send_telegram("🌀 Grabbing proxies from WebShare...")
     headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
     async with aiohttp.ClientSession() as session:
         try:
@@ -102,7 +101,8 @@ async def fetch_proxies():
                 valid = await validate_proxies(raw_proxies)
                 for proxy in valid:
                     await proxy_pool.put(proxy)
-                logging.info(f"[INFO] Loaded {len(valid)} valid proxies.")
+                logging.info(f"{len(valid)} proxies are working.")
+                await send_telegram(f"✅ {len(valid)} proxies are working.")
         except Exception as e:
             logging.error(f"[ERROR] Failed to fetch proxies: {e}")
 
@@ -119,7 +119,6 @@ async def validate_proxies(proxies):
     results = await asyncio.gather(*tasks)
     return [p for p in results if p]
 
-# --- CHECKING ---
 async def check_username(session, proxy, username):
     proxy_url = f"http://{proxy}"
     headers = {"User-Agent": random.choice(HEADERS_LIST)}
@@ -130,7 +129,7 @@ async def check_username(session, proxy, username):
                 if username not in available_usernames:
                     logging.info(f"[AVAILABLE] @{username}")
                     available_usernames.add(username)
-                    await send_telegram(username)
+                    await send_telegram(f"✅ Available TikTok: @{username}")
             elif resp.status in (429, 403):
                 await asyncio.sleep(5)
     except Exception:
@@ -154,14 +153,12 @@ async def checker_loop():
             username = username_wordlists.pop() if username_wordlists else generate_username()
             proxy = await proxy_pool.get()
             asyncio.create_task(check_username(session, proxy, username))
-            await asyncio.sleep(random.uniform(0.3, 0.7))
+            await asyncio.sleep(random.uniform(0.4, 0.9))
 
-# --- FASTAPI WEBHOOK ---
 @app.post("/webhook")
 async def handle_webhook(request: Request):
     global checking_active
     data = await request.json()
-    logging.info(f"Received webhook: {data}")
     message = data.get("message", {})
     text = message.get("text", "")
     chat_id = str(message.get("chat", {}).get("id"))
@@ -173,34 +170,24 @@ async def handle_webhook(request: Request):
         checking_active = True
         asyncio.create_task(checker_loop())
         return JSONResponse({"status": "Started checking usernames."})
+
     elif text == "/stop":
         checking_active = False
+        await send_telegram("🔴 Checker stopped.")
         return JSONResponse({"status": "Stopped checking."})
 
     return JSONResponse({"status": "OK"})
 
-# --- MAIN ---
+async def set_webhook():
+    payload = {"url": WEBHOOK_URL}
+    async with aiohttp.ClientSession() as session:
+        await session.post(f"{TELEGRAM_API_URL}/setWebhook", json=payload)
+
 async def main():
+    await set_webhook()
+    await send_telegram("✅ Checker is online.")
     await fetch_proxies()
-
-    port = int(os.getenv("PORT", 8000))
-    
-    # Auto-set Telegram webhook
-    if WEBHOOK_URL:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
-            payload = {"url": WEBHOOK_URL}
-            try:
-                async with session.post(url, json=payload) as resp:
-                    result = await resp.json()
-                    if result.get("ok"):
-                        logging.info(f"[INFO] Webhook set to {WEBHOOK_URL}")
-                    else:
-                        logging.warning(f"[WARN] Failed to set webhook: {result}")
-            except Exception as e:
-                logging.warning(f"[ERROR] Exception while setting webhook: {e}")
-
-    config = Config(app=app, host="0.0.0.0", port=port, log_level="info")
+    config = Config(app=app, host="0.0.0.0", port=8000, log_level="info")
     server = Server(config)
     await server.serve()
 
