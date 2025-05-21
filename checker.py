@@ -216,6 +216,7 @@ async def set_webhook():
                 logging.info("Webhook set successfully.")
             else:
                 logging.warning(f"Failed to set webhook: HTTP {resp.status}")
+import uvicorn
 
 async def main():
     await set_webhook()
