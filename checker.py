@@ -31,8 +31,11 @@ available_usernames = set()
 username_wordlists = []
 MAX_USERNAME_SOURCES = 2
 COOLDOWN_SECONDS = 10  # Proxy cooldown to prevent overuse
+MAX_CONCURRENT_CHECKS = 30  # Limit concurrency to avoid overload
+MAX_RETRIES = 3  # For retrying Telegram messages or fetches
 
 app = FastAPI()
+
 
 def load_usernames_from_file(filename):
     if os.path.exists(filename):
@@ -42,10 +45,12 @@ def load_usernames_from_file(filename):
             return lines
     return []
 
+
 USERNAME_SOURCES = [
     "https://raw.githubusercontent.com/dominictarr/random-name/master/first-names.txt",
     "https://raw.githubusercontent.com/dominictarr/random-name/master/names.txt",
 ]
+
 
 async def fetch_username_list(session, url):
     try:
@@ -54,10 +59,14 @@ async def fetch_username_list(session, url):
                 text = await resp.text()
                 lines = [line.strip().lower() for line in text.splitlines() if 3 < len(line.strip()) <= 4]
                 random.shuffle(lines)
+                logging.info(f"Fetched {len(lines)} usernames from {url}")
                 return lines
+            else:
+                logging.warning(f"Failed to fetch usernames from {url}: HTTP {resp.status}")
     except Exception as e:
-        logging.warning(f"Failed to fetch username list from {url}: {e}")
+        logging.warning(f"Exception while fetching usernames from {url}: {e}")
     return []
+
 
 async def gather_usernames():
     usernames = []
@@ -67,7 +76,9 @@ async def gather_usernames():
             usernames.extend(lines)
     usernames.extend(load_usernames_from_file("wordlist.txt"))
     random.shuffle(usernames)
+    logging.info(f"Total usernames gathered: {len(usernames)}")
     return usernames
+
 
 def generate_username():
     vowels = "aeiou"
@@ -75,7 +86,8 @@ def generate_username():
     pattern = random.choice(["CVCV", "CVVC", "VCCV", "CCVV"])
     return ''.join(random.choice(vowels if c == "V" else consonants) for c in pattern)
 
-async def send_telegram(text):
+
+async def send_telegram(text, retries=0):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
@@ -83,9 +95,18 @@ async def send_telegram(text):
     }
     async with aiohttp.ClientSession() as session:
         try:
-            await session.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
+            async with session.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload, timeout=10) as resp:
+                if resp.status != 200:
+                    logging.warning(f"Telegram sendMessage failed with status {resp.status}: {await resp.text()}")
+                    if retries < MAX_RETRIES:
+                        await asyncio.sleep(2 ** retries)  # Exponential backoff
+                        return await send_telegram(text, retries + 1)
         except Exception as e:
             logging.warning(f"Failed to send telegram message: {e}")
+            if retries < MAX_RETRIES:
+                await asyncio.sleep(2 ** retries)
+                return await send_telegram(text, retries + 1)
+
 
 async def fetch_proxies():
     logging.info("Grabbing proxies from WebShare...")
@@ -100,23 +121,15 @@ async def fetch_proxies():
                     return
 
                 data = await response.json()
-                logging.info(f"Webshare response: {data}")
-
-                if "results" not in data or not data["results"]:
-                    logging.error("[ERROR] No proxies found in Webshare API response.")
-                    await send_telegram("❌ No proxies found from Webshare API.")
-                    return
+                logging.info(f"Webshare response received with {len(data.get('results', []))} proxies")
 
                 raw_proxies = []
-                for item in data["results"]:
-                    try:
-                        proxy_address = item.get("proxy_address")
-                        ports = item.get("ports", {})
-                        http_port = ports.get("http")
-                        if proxy_address and http_port:
-                            raw_proxies.append(f"{proxy_address}:{http_port}")
-                    except Exception as e:
-                        logging.warning(f"Failed to parse a proxy entry: {e}")
+                for item in data.get("results", []):
+                    proxy_address = item.get("proxy_address")
+                    ports = item.get("ports", {})
+                    http_port = ports.get("http")
+                    if proxy_address and http_port:
+                        raw_proxies.append(f"{proxy_address}:{http_port}")
 
                 if not raw_proxies:
                     logging.error("[ERROR] No valid proxies extracted from Webshare API response.")
@@ -124,53 +137,78 @@ async def fetch_proxies():
                     return
 
                 valid = await validate_proxies(raw_proxies)
+                # Clear queue and refill with new valid proxies (to prevent stale proxies)
+                while not proxy_pool.empty():
+                    try:
+                        proxy_pool.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
                 for proxy in valid:
                     await proxy_pool.put(proxy)
-                logging.info(f"{len(valid)} proxies are working.")
-                await send_telegram(f"✅ {len(valid)} proxies are working.")
+                logging.info(f"{len(valid)} proxies validated and loaded into the pool.")
+                await send_telegram(f"✅ {len(valid)} proxies are working and ready.")
         except Exception as e:
             logging.error(f"[ERROR] Failed to fetch proxies: {e}")
             await send_telegram(f"❌ Exception during proxy fetch: {e}")
+
 
 async def validate_proxies(proxies):
     async def test(proxy):
         try:
             timeout = aiohttp.ClientTimeout(total=5)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get("http://httpbin.org/ip", proxy=f"http://{proxy}"):
-                    return proxy
-        except:
+                async with session.get("http://httpbin.org/ip", proxy=f"http://{proxy}") as resp:
+                    if resp.status == 200:
+                        return proxy
+        except Exception:
             return None
+
     tasks = [test(p) for p in proxies]
     results = await asyncio.gather(*tasks)
-    return [p for p in results if p]
+    valid_proxies = [p for p in results if p]
+    return valid_proxies
+
 
 async def release_proxy_after_cooldown(proxy):
     await asyncio.sleep(COOLDOWN_SECONDS)
     await proxy_pool.put(proxy)
 
-async def check_username(session, proxy, username):
+
+async def check_username(session, proxy, username, semaphore):
     proxy_url = f"http://{proxy}"
     headers = {"User-Agent": random.choice(HEADERS_LIST)}
 
-    try:
-        async with session.get(BASE_URL.format(username), proxy=proxy_url, headers=headers, timeout=10) as resp:
-            if resp.status == 404:
-                if username not in available_usernames:
-                    logging.info(f"[AVAILABLE] @{username}")
-                    available_usernames.add(username)
-                    await send_telegram(f"✅ Available TikTok: @{username}")
-            elif resp.status in (429, 403):
-                await asyncio.sleep(5)
-    except Exception:
-        pass
-    finally:
-        asyncio.create_task(release_proxy_after_cooldown(proxy))
+    async with semaphore:
+        try:
+            async with session.get(BASE_URL.format(username), proxy=proxy_url, headers=headers, timeout=10) as resp:
+                if resp.status == 404:
+                    if username not in available_usernames:
+                        logging.info(f"[AVAILABLE] @{username}")
+                        available_usernames.add(username)
+                        await send_telegram(f"✅ Available TikTok: @{username}")
+                elif resp.status in (429, 403):
+                    logging.warning(f"Rate limited or forbidden for @{username} (status {resp.status}), re-queueing proxy")
+                    # Return proxy immediately without cooldown, could wait or replace proxy later
+                    await proxy_pool.put(proxy)
+                    await asyncio.sleep(5)
+                    return
+                else:
+                    # Other HTTP statuses - consider re-queue proxy
+                    await proxy_pool.put(proxy)
+        except Exception as e:
+            logging.debug(f"Error checking username @{username} via proxy {proxy}: {e}")
+            # Proxy likely dead or connection error, do not put proxy back into pool here
+            return
+        else:
+            # If no exceptions and no rate limiting, release proxy after cooldown
+            asyncio.create_task(release_proxy_after_cooldown(proxy))
+
 
 async def checker_loop():
     global checking_active, username_wordlists
     username_wordlists = await gather_usernames()
     connector = aiohttp.TCPConnector(ssl=False)
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHECKS)
 
     async with aiohttp.ClientSession(connector=connector) as session:
         while checking_active:
@@ -179,10 +217,18 @@ async def checker_loop():
                 await fetch_proxies()
                 await asyncio.sleep(3)
                 continue
-            username = username_wordlists.pop() if username_wordlists else generate_username()
+
+            username = None
+            if username_wordlists:
+                username = username_wordlists.pop()
+            else:
+                username = generate_username()
+
             proxy = await proxy_pool.get()
-            asyncio.create_task(check_username(session, proxy, username))
-            await asyncio.sleep(random.uniform(0.1, 0.3))  # dispatch quickly for throughput
+            # Dispatch check task with semaphore to limit concurrency
+            asyncio.create_task(check_username(session, proxy, username, semaphore))
+            await asyncio.sleep(random.uniform(0.1, 0.3))  # slight delay for throughput
+
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
@@ -198,6 +244,7 @@ async def handle_webhook(request: Request):
     if text == "/start" and not checking_active:
         checking_active = True
         asyncio.create_task(checker_loop())
+        await send_telegram("🟢 Checker started.")
         return JSONResponse({"status": "Started checking usernames."})
 
     elif text == "/stop" and checking_active:
@@ -205,12 +252,27 @@ async def handle_webhook(request: Request):
         await send_telegram("🔴 Checker stopped.")
         return JSONResponse({"status": "Stopped checking."})
 
+    elif text == "/proxies":
+        # Optionally report proxy pool size
+        size = proxy_pool.qsize()
+        await send_telegram(f"🛡️ Proxy pool size: {size}")
+        return JSONResponse({"status": f"Proxy pool size: {size}"})
+
     return JSONResponse({"status": "OK"})
+
 
 async def set_webhook():
     payload = {"url": WEBHOOK_URL}
     async with aiohttp.ClientSession() as session:
-        await session.post(f"{TELEGRAM_API_URL}/setWebhook", json=payload)
+        try:
+            async with session.post(f"{TELEGRAM_API_URL}/setWebhook", json=payload, timeout=10) as resp:
+                if resp.status != 200:
+                    logging.error(f"Failed to set webhook: {resp.status} {await resp.text()}")
+                else:
+                    logging.info("Webhook set successfully.")
+        except Exception as e:
+            logging.error(f"Exception setting webhook: {e}")
+
 
 async def main():
     await set_webhook()
@@ -219,6 +281,7 @@ async def main():
     config = Config(app=app, host="0.0.0.0", port=8000, log_level="info")
     server = Server(config)
     await server.serve()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
