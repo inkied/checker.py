@@ -70,28 +70,45 @@ async def fetch_webshare_proxies():
     except Exception as e:
         print(f"❌ Error fetching proxies: {e}")
 
-# --- Semi-OG username list ---
-SEMI_OG_USERNAMES = [
-    "tsla", "kurv", "curv", "stak", "lcky", "loky", "prvn", "blnk",
-    "zync", "lyft", "voxy", "quix", "nexo", "fizz", "drft", "plnk",
-    "vibe", "moxy", "jolt", "flux", "kink", "bump", "glow", "nova",
-    "loop", "skye", "zest", "rize", "peak", "mesh", "vivo", "qube",
-    # Add more to taste, total a few hundred preferred
+# --- Upgraded username generator with brandable + semi-OG patterns ---
+vowels = "aeiou"
+consonants = "bcdfghjklmnpqrstvwxyz"
+
+brandable_prefixes = [
+    "kur", "lok", "ruk", "vak", "tik", "zik", "buk", "cak", "dok", "fik",
+    "lak", "mok", "nak", "pak", "rak", "sak", "tak", "vak", "wak", "yuk"
 ]
 
-# Create an async-safe queue for usernames
-USERNAME_QUEUE = asyncio.Queue()
+brandable_suffixes = [
+    "y", "i", "o", "u", "a", "e"
+]
 
-async def load_usernames():
-    # Shuffle and load usernames into queue
-    random.shuffle(SEMI_OG_USERNAMES)
-    for username in SEMI_OG_USERNAMES:
-        await USERNAME_QUEUE.put(username)
+semi_og_patterns = [
+    lambda: random.choice(consonants) + random.choice(vowels) + random.choice(consonants) + random.choice(vowels),
+    lambda: random.choice(consonants) + random.choice(consonants) + random.choice(vowels) + random.choice(consonants),
+    lambda: random.choice(consonants) + random.choice(vowels) + random.choice(vowels) + random.choice(consonants),
+    lambda: random.choice(consonants) + random.choice(vowels) + random.choice(consonants) + random.choice(consonants),
+    lambda: random.choice(consonants) * 2 + random.choice(vowels) + random.choice(consonants),
+]
 
-async def get_next_username():
-    if USERNAME_QUEUE.empty():
-        return None
-    return await USERNAME_QUEUE.get()
+def generate_username():
+    choice = random.choices(
+        ["brandable", "semi_og", "random"], weights=[0.4, 0.4, 0.2], k=1
+    )[0]
+
+    if choice == "brandable":
+        prefix = random.choice(brandable_prefixes)
+        suffix = random.choice(brandable_suffixes)
+        username = (prefix + suffix)[:4]
+        return username
+
+    elif choice == "semi_og":
+        username = random.choice(semi_og_patterns)()
+        return username
+
+    else:
+        letters = consonants + vowels
+        return ''.join(random.choices(letters, k=4))
 
 async def send_message(text):
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -161,16 +178,10 @@ async def run_checker_loop():
             await asyncio.sleep(5)
             continue
 
-        username = await get_next_username()
-        if not username:
-            await send_message("⚠️ No more usernames to check. Stopping.")
-            CHECKER_RUNNING = False
-            break
-
+        username = generate_username()
         available = await check_username(username)
         if available:
             await send_message(f"🎯 Available: <b>@{username}</b>")
-
         await asyncio.sleep(random.uniform(0.7, 1.3))
 
     await send_message("🛑 Checker stopped")
@@ -186,7 +197,6 @@ async def webhook(request: Request):
         text = data["message"].get("text", "")
         if text == "/start":
             if not CHECKER_RUNNING:
-                await load_usernames()  # load queue fresh on start
                 asyncio.create_task(run_checker_loop())
             else:
                 await send_message("🔁 Already running.")
