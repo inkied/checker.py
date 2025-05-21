@@ -91,55 +91,46 @@ async def fetch_proxies():
     logging.info("Grabbing proxies from WebShare...")
     await send_telegram("🌀 Grabbing proxies from WebShare...")
     headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
-    
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(PROXY_API_URL, headers=headers, timeout=10) as response:
-                data = await response.json()
-                logging.info(f"Webshare raw response: {data}")
-
                 if response.status != 200:
-                    msg = f"❌ Webshare API error: status {response.status}"
-                    logging.error(msg)
-                    await send_telegram(msg)
+                    logging.error(f"[ERROR] Webshare API responded with status {response.status}")
+                    await send_telegram(f"❌ Webshare API error: status {response.status}")
                     return
 
-                results = data.get("results")
-                if not results:
-                    msg = "❌ No proxies found in Webshare API response."
-                    logging.error(msg)
-                    await send_telegram(msg)
+                data = await response.json()
+                logging.info(f"Webshare response: {data}")
+
+                if "results" not in data or not data["results"]:
+                    logging.error("[ERROR] No proxies found in Webshare API response.")
+                    await send_telegram("❌ No proxies found from Webshare API.")
                     return
 
                 raw_proxies = []
-                for item in results:
+                for item in data["results"]:
                     try:
-                        ip = item.get("proxy_address")
+                        proxy_address = item.get("proxy_address")
                         ports = item.get("ports", {})
-                        http_port = ports.get("http") or item.get("port") or ports.get("standard")
-                        if ip and http_port:
-                            raw_proxies.append(f"{ip}:{http_port}")
+                        http_port = ports.get("http")
+                        if proxy_address and http_port:
+                            raw_proxies.append(f"{proxy_address}:{http_port}")
                     except Exception as e:
                         logging.warning(f"Failed to parse a proxy entry: {e}")
 
                 if not raw_proxies:
-                    msg = "❌ No valid proxies extracted from Webshare API."
-                    logging.error(msg)
-                    await send_telegram(msg)
+                    logging.error("[ERROR] No valid proxies extracted from Webshare API response.")
+                    await send_telegram("❌ No valid proxies extracted from Webshare API.")
                     return
 
                 valid = await validate_proxies(raw_proxies)
                 for proxy in valid:
                     await proxy_pool.put(proxy)
-
-                msg = f"✅ {len(valid)} proxies are working."
-                logging.info(msg)
-                await send_telegram(msg)
-
+                logging.info(f"{len(valid)} proxies are working.")
+                await send_telegram(f"✅ {len(valid)} proxies are working.")
         except Exception as e:
-            msg = f"❌ Exception during proxy fetch: {e}"
-            logging.error(msg)
-            await send_telegram(msg)
+            logging.error(f"[ERROR] Failed to fetch proxies: {e}")
+            await send_telegram(f"❌ Exception during proxy fetch: {e}")
 
 async def validate_proxies(proxies):
     async def test(proxy):
@@ -204,15 +195,23 @@ async def handle_webhook(request: Request):
     if chat_id != TELEGRAM_CHAT_ID:
         return JSONResponse({"error": "Unauthorized"}, status_code=status.HTTP_403_FORBIDDEN)
 
-    if text == "/start" and not checking_active:
-        checking_active = True
-        asyncio.create_task(checker_loop())
-        return JSONResponse({"status": "Started checking usernames."})
+    if text == "/start":
+        if not checking_active:
+            checking_active = True
+            asyncio.create_task(checker_loop())
+            await send_telegram("🟢 Checker started.")
+            return JSONResponse({"status": "Started checking usernames."})
+        else:
+            await send_telegram("⚠️ Checker is already running.")
+            return JSONResponse({"status": "Already running."})
 
-    elif text == "/stop" and checking_active:
-        checking_active = False
-        await send_telegram("🔴 Checker stopped.")
-        return JSONResponse({"status": "Stopped checking."})
+    elif text == "/stop":
+        if checking_active:
+            checking_active = False
+            await send_telegram("🔴 Checker stopped.")
+            return JSONResponse({"status": "Stopped checking."})
+        else:
+            return JSONResponse({"status": "Checker not running."})
 
     return JSONResponse({"status": "OK"})
 
