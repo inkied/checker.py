@@ -50,7 +50,7 @@ async def fetch_webshare_proxies():
                     p = f"http://{proxy['proxy_address']}:{proxy['ports']['http']}"
                 proxies.append(p)
             PROXIES = proxies
-            print(f"Fetched {len(PROXIES)} proxies from Webshare")
+            print(f"🌀 Fetched {len(PROXIES)} proxies from Webshare")
 
 def generate_username(length=4):
     return ''.join(random.choices(string.ascii_lowercase, k=length))
@@ -75,13 +75,12 @@ async def check_username(username):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, proxy=proxy, allow_redirects=False, timeout=10) as resp:
-                # 404 means username available, 200 means taken
                 if resp.status == 404:
                     return True
                 else:
                     return False
     except Exception as e:
-        print(f"Proxy error on {proxy}: {e}")
+        print(f"❌ Proxy error on {proxy}: {e}")
         if proxy in PROXIES:
             PROXIES.remove(proxy)
         return False
@@ -89,26 +88,29 @@ async def check_username(username):
 async def run_checker_loop():
     global CHECKER_RUNNING
     CHECKER_RUNNING = True
-    print("Checker started")
+    print("✅ Checker started")
 
     while CHECKER_RUNNING:
         username = generate_username()
-        print(f"Checking username: {username}")
+        print(f"🔍 Checking username: {username}")
 
         available = await check_username(username)
         if available:
+            print(f"🎯 Sending alert: {username} is available")
             await send_message(f"Username <b>@{username}</b> is available!")
+        else:
+            print(f"⛔ {username} is taken or check failed")
 
         await asyncio.sleep(1)
 
     CHECKER_RUNNING = False
-    print("Checker stopped")
+    print("🛑 Checker stopped")
 
 @app.post("/webhook")
 async def webhook(request: Request):
     global CHECKER_RUNNING
     data = await request.json()
-    print(f"Received update: {data}")
+    print(f"📩 Received update: {data}")
 
     if "message" in data:
         message = data["message"]
@@ -116,17 +118,17 @@ async def webhook(request: Request):
 
         if text == "/start":
             if not CHECKER_RUNNING:
-                await send_message("Checker is starting...")
+                await send_message("⚙️ Checker is starting...")
                 asyncio.create_task(run_checker_loop())
             else:
-                print("Checker already running, ignoring /start command.")
+                print("⚠️ Checker already running, ignoring /start command.")
 
         elif text == "/stop":
             if CHECKER_RUNNING:
                 CHECKER_RUNNING = False
-                await send_message("Checker stopped.")
+                await send_message("🛑 Checker stopped.")
             else:
-                print("Checker not running, ignoring /stop command.")
+                print("⚠️ Checker not running, ignoring /stop command.")
 
     return {"ok": True}
 
@@ -140,14 +142,14 @@ async def startup_event():
     async with aiohttp.ClientSession() as session:
         set_url = f"{BOT_API_URL}/setWebhook"
         set_resp = await session.post(set_url, json={"url": WEBHOOK_URL})
-        print("Set webhook response:", await set_resp.json())
+        print("🔗 Set webhook response:", await set_resp.json())
 
         info_url = f"{BOT_API_URL}/getWebhookInfo"
         info_resp = await session.get(info_url)
         info_data = await info_resp.json()
-        print("Current webhook info:", info_data)
+        print("ℹ️ Current webhook info:", info_data)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    print(f"Starting server on port: {port}")
+    print(f"🚀 Starting server on port: {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
