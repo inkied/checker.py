@@ -2,44 +2,70 @@ import aiohttp
 import asyncio
 import os
 import random
-import re
-from dotenv import load_dotenv
 from aiohttp import web
+from dotenv import load_dotenv
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
-PROXY_API_URL = "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100"
 
 BASE_URL = "https://www.tiktok.com/@{}"
 HEADERS_LIST = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/113",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
 ]
+PROXY_API_URL = "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100"
 
 proxy_pool = asyncio.Queue()
 checking_active = False
-available_usernames = []
 username_wordlist = []
+available_usernames = []
 
-# --- UTILS ---
+WORDLIST_SOURCES = [
+    "https://raw.githubusercontent.com/dominictarr/random-name/master/first-names.json",
+    "https://raw.githubusercontent.com/dariusk/corpora/master/data/humans/firstNames.json"
+]
+
+# ----------------- Username Gen -----------------
 def generate_username():
     vowels = "aeiou"
     consonants = "bcdfghjklmnpqrstvwxyz"
     pattern = random.choice(["CVCV", "CVVC", "VCCV", "CCVV"])
     return ''.join(random.choice(vowels if c == "V" else consonants) for c in pattern)
 
-def load_usernames_from_file():
+async def load_usernames():
+    global username_wordlist
+    all_names = set()
+
+    # Load from URLs
+    for url in WORDLIST_SOURCES:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, dict):
+                            names = data.get("firstNames", [])
+                        elif isinstance(data, list):
+                            names = data
+                        else:
+                            names = []
+                        all_names.update(name.lower() for name in names if 3 < len(name) <= 4)
+        except Exception:
+            continue
+
+    # Local fallback
     if os.path.exists("wordlist.txt"):
         with open("wordlist.txt", "r") as f:
-            lines = [line.strip().lower() for line in f if 3 < len(line.strip()) <= 4]
-            random.shuffle(lines)
-            return lines
-    return []
+            local = [line.strip().lower() for line in f if 3 < len(line.strip()) <= 4]
+            all_names.update(local)
 
-# --- TELEGRAM ---
+    username_wordlist = list(all_names)
+    random.shuffle(username_wordlist)
+
+# ----------------- Telegram -----------------
 async def send_telegram(username):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -50,9 +76,8 @@ async def send_telegram(username):
     async with aiohttp.ClientSession() as session:
         await session.post(url, json=payload)
 
-# --- PROXIES ---
+# ----------------- Proxies -----------------
 async def fetch_proxies():
-    print("[INFO] Scraping Webshare proxies...")
     headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
     async with aiohttp.ClientSession() as session:
         async with session.get(PROXY_API_URL, headers=headers) as response:
@@ -64,7 +89,7 @@ async def fetch_proxies():
             valid = await validate_proxies(raw_proxies)
             for proxy in valid:
                 await proxy_pool.put(proxy)
-            print(f"[INFO] Loaded {len(valid)} valid proxies.")
+            print(f"[INFO] {len(valid)} healthy proxies loaded.")
 
 async def validate_proxies(proxies):
     async def test(proxy):
@@ -78,7 +103,7 @@ async def validate_proxies(proxies):
     results = await asyncio.gather(*tasks)
     return [p for p in results if p]
 
-# --- MAIN CHECK ---
+# ----------------- Checker -----------------
 async def check_username(session, proxy, username):
     proxy_url = f"http://{proxy}"
     headers = {"User-Agent": random.choice(HEADERS_LIST)}
@@ -92,25 +117,30 @@ async def check_username(session, proxy, username):
     except:
         pass
     finally:
-        await asyncio.sleep(random.uniform(1.5, 3.5))  # Delay before reuse
+        await asyncio.sleep(random.uniform(2, 4))
         await proxy_pool.put(proxy)
 
 async def checker_loop():
     global checking_active, username_wordlist
-    username_wordlist = load_usernames_from_file()
+    await load_usernames()
     connector = aiohttp.TCPConnector(ssl=False)
 
     async with aiohttp.ClientSession(connector=connector) as session:
         while checking_active:
-            username = username_wordlist.pop() if username_wordlist else generate_username()
+            if not username_wordlist:
+                username = generate_username()
+            else:
+                username = username_wordlist.pop()
+
             if proxy_pool.empty():
                 await asyncio.sleep(1)
                 continue
+
             proxy = await proxy_pool.get()
             asyncio.create_task(check_username(session, proxy, username))
-            await asyncio.sleep(random.uniform(0.3, 0.7))
+            await asyncio.sleep(random.uniform(0.3, 0.6))
 
-# --- TELEGRAM BOT WEBHOOK HANDLING ---
+# ----------------- Telegram Bot Webhook -----------------
 async def handle_webhook(request):
     global checking_active
 
@@ -125,15 +155,15 @@ async def handle_webhook(request):
     if text == "/start" and not checking_active:
         checking_active = True
         asyncio.create_task(checker_loop())
-        return web.Response(text="Started checking usernames.")
+        return web.Response(text="✅ Started username checking.")
 
     elif text == "/stop":
         checking_active = False
-        return web.Response(text="Stopped.")
+        return web.Response(text="⛔️ Stopped.")
 
     return web.Response(text="OK")
 
-# --- FASTAPI / WEB ---
+# ----------------- Webhook Server -----------------
 async def start_webhook_server():
     app = web.Application()
     app.router.add_post('/webhook', handle_webhook)
@@ -141,9 +171,9 @@ async def start_webhook_server():
     await runner.setup()
     site = web.TCPSite(runner, port=8080)
     await site.start()
-    print("[INFO] Webhook server running at /webhook")
+    print("[INFO] Webhook listening at /webhook")
 
-# --- MAIN ENTRY ---
+# ----------------- Entry -----------------
 async def main():
     await fetch_proxies()
     await start_webhook_server()
