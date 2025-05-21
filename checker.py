@@ -228,33 +228,3 @@ async def telegram_webhook(req: Request):
             username = data_text.split("claim:")[1]
             # You can add your claim logic here
             await send_telegram(f"User {user_id} claimed username: {username}")
-            # Optionally answer callback query
-            return JSONResponse({"method": "answerCallbackQuery", "callback_query_id": callback["id"], "text": f"Claimed {username}!"})
-        elif data_text.startswith("skip:"):
-            username = data_text.split("skip:")[1]
-            # Logic for skipping username if needed
-            await send_telegram(f"User {user_id} skipped username: {username}")
-            return JSONResponse({"method": "answerCallbackQuery", "callback_query_id": callback["id"], "text": f"Skipped {username}."})
-
-    return JSONResponse({"status": "ok"})
-
-# --- Start/stop commands for checking ---
-@app.post("/start")
-async def start_checking():
-    global checking_active
-    if not checking_active:
-        checking_active = True
-        asyncio.create_task(checker_loop())
-        return {"status": "started"}
-    return {"status": "already running"}
-
-@app.post("/stop")
-async def stop_checking():
-    global checking_active
-    checking_active = False
-    return {"status": "stopped"}
-
-# --- Main entry for local testing ---
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
