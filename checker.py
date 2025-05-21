@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import random
 import string
+import time
 from fastapi import FastAPI, BackgroundTasks, Request
 
 # CONFIG
@@ -12,6 +13,8 @@ WEBSHARE_API_KEY = "cmaqd2pxyf6h1bl93ozf7z12mm2efjsvbd7w366z"
 CHECK_CONCURRENCY = 30
 BATCH_SIZE = 5
 SAVE_FILE = "available_tiktok_usernames.txt"
+PROXY_COOLDOWN = 30  # seconds cooldown before reusing same proxy after failure
+PROXY_MAX_FAILS = 3  # max fails before removing proxy
 
 vowels = "aeiouy"
 consonants = "".join(c for c in string.ascii_lowercase if c not in vowels)
@@ -109,24 +112,61 @@ async def send_inline_buttons(chat_id):
     async with aiohttp.ClientSession() as session:
         await session.post(url, json=payload)
 
-async def worker(queue, session, proxies):
+class ProxyManager:
+    def __init__(self, proxies):
+        self.proxies = proxies
+        self.fail_counts = {proxy: 0 for proxy in proxies}
+        self.last_used = {proxy: 0 for proxy in proxies}
+        self.lock = asyncio.Lock()
+
+    async def get_proxy(self):
+        async with self.lock:
+            now = time.time()
+            available = [p for p in self.proxies if (now - self.last_used[p]) > PROXY_COOLDOWN]
+            if not available:
+                # If none available due to cooldown, pick any (force reuse)
+                available = self.proxies
+            proxy = random.choice(available)
+            self.last_used[proxy] = now
+            return proxy
+
+    async def report_failure(self, proxy):
+        async with self.lock:
+            self.fail_counts[proxy] += 1
+            if self.fail_counts[proxy] >= PROXY_MAX_FAILS:
+                # Remove proxy permanently
+                print(f"[PROXY REMOVED] {proxy} due to repeated failures.")
+                self.proxies.remove(proxy)
+                del self.fail_counts[proxy]
+                del self.last_used[proxy]
+
+async def worker(queue, session, proxy_manager):
     available = []
     while True:
         username = await queue.get()
-        proxy = random.choice(proxies) if proxies else None
+        proxy = await proxy_manager.get_proxy() if proxy_manager.proxies else None
         if proxy and not proxy.startswith("http"):
             proxy = "http://" + proxy
-        is_available = await check_username(session, username, proxy)
-        if is_available:
-            print(f"[AVAILABLE] {username}")
-            available.append(username)
-            with open(SAVE_FILE, "a") as f:
-                f.write(username + "\n")
-            if len(available) >= BATCH_SIZE:
-                await send_telegram_message(session, available)
-                available.clear()
-        queue.task_done()
-        await asyncio.sleep(random.uniform(0.1, 0.4))
+
+        try:
+            is_available = await check_username(session, username, proxy)
+            if is_available:
+                print(f"[AVAILABLE] {username}")
+                available.append(username)
+                with open(SAVE_FILE, "a") as f:
+                    f.write(username + "\n")
+                if len(available) >= BATCH_SIZE:
+                    await send_telegram_message(session, available)
+                    available.clear()
+        except Exception:
+            # On any exception, mark proxy as failed and retry once
+            if proxy:
+                await proxy_manager.report_failure(proxy)
+            # Requeue username for retry
+            await queue.put(username)
+        finally:
+            queue.task_done()
+            await asyncio.sleep(random.uniform(0.1, 0.4))
 
 async def run_checker():
     usernames = semi_og_generator(1000)
@@ -143,7 +183,9 @@ async def run_checker():
                 valid_proxies.append(proxy)
         print(f"Valid proxies: {len(valid_proxies)}")
 
-        tasks = [asyncio.create_task(worker(queue, session, valid_proxies)) for _ in range(CHECK_CONCURRENCY)]
+        proxy_manager = ProxyManager(valid_proxies)
+
+        tasks = [asyncio.create_task(worker(queue, session, proxy_manager)) for _ in range(CHECK_CONCURRENCY)]
         await queue.join()
         for task in tasks:
             task.cancel()
