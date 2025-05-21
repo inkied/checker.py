@@ -94,6 +94,21 @@ async def send_telegram_message(session, messages):
         print(f"Telegram send error: {e}")
         return None
 
+async def send_inline_buttons(chat_id):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": "TikTok Username Checker\nChoose an action below:",
+        "reply_markup": {
+            "inline_keyboard": [
+                [{"text": "▶ Start", "callback_data": "start"}],
+                [{"text": "⛔ Stop", "callback_data": "stop"}]
+            ]
+        }
+    }
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, json=payload)
+
 async def worker(queue, session, proxies):
     available = []
     while True:
@@ -147,12 +162,28 @@ async def start_checker(background_tasks: BackgroundTasks):
     return {"message": "Checker started in background"}
 
 @app.post("/webhook")
-async def telegram_webhook(request: Request):
+async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     print("Webhook received:", data)
-    
-    if "message" in data and data["message"].get("text") == "/start":
-        async with aiohttp.ClientSession() as session:
-            await send_telegram_message(session, ["✅ TikTok checker is running."])
-    
+
+    if "message" in data:
+        message = data["message"]
+        chat_id = message["chat"]["id"]
+
+        if message.get("text") == "/start":
+            await send_inline_buttons(chat_id)
+
+    elif "callback_query" in data:
+        query = data["callback_query"]
+        chat_id = query["message"]["chat"]["id"]
+        command = query["data"]
+
+        if command == "start":
+            background_tasks.add_task(run_checker)
+            async with aiohttp.ClientSession() as session:
+                await send_telegram_message(session, ["✅ TikTok checker started."])
+        elif command == "stop":
+            async with aiohttp.ClientSession() as session:
+                await send_telegram_message(session, ["⛔ Stop not implemented yet."])
+
     return {"ok": True}
