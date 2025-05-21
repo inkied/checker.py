@@ -2,13 +2,15 @@ import aiohttp
 import asyncio
 import os
 import random
-import re
+import logging
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Response, status
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
 from uvicorn import Config, Server
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -30,7 +32,6 @@ MAX_USERNAME_SOURCES = 2  # limit how many wordlists we load to control memory
 app = FastAPI()
 
 # --- USERNAME SOURCES ---
-# Local wordlist loading
 def load_usernames_from_file(filename):
     if os.path.exists(filename):
         with open(filename, "r") as f:
@@ -39,7 +40,6 @@ def load_usernames_from_file(filename):
             return lines
     return []
 
-# Hardcoded URLs of wordlists (you can add your own URLs)
 USERNAME_SOURCES = [
     "https://raw.githubusercontent.com/dominictarr/random-name/master/first-names.txt",
     "https://raw.githubusercontent.com/dominictarr/random-name/master/names.txt",
@@ -53,8 +53,8 @@ async def fetch_username_list(session, url):
                 lines = [line.strip().lower() for line in text.splitlines() if 3 < len(line.strip()) <= 4]
                 random.shuffle(lines)
                 return lines
-    except:
-        pass
+    except Exception as e:
+        logging.warning(f"Failed to fetch username list from {url}: {e}")
     return []
 
 async def gather_usernames():
@@ -63,12 +63,10 @@ async def gather_usernames():
         for url in USERNAME_SOURCES[:MAX_USERNAME_SOURCES]:
             lines = await fetch_username_list(session, url)
             usernames.extend(lines)
-    # fallback local file
     usernames.extend(load_usernames_from_file("wordlist.txt"))
     random.shuffle(usernames)
     return usernames
 
-# Simple live username generator fallback
 def generate_username():
     vowels = "aeiou"
     consonants = "bcdfghjklmnpqrstvwxyz"
@@ -86,8 +84,8 @@ async def send_telegram(username):
     async with aiohttp.ClientSession() as session:
         try:
             await session.post(url, json=payload)
-        except:
-            pass
+        except Exception as e:
+            logging.warning(f"Failed to send telegram message: {e}")
 
 # --- PROXIES ---
 async def fetch_proxies():
@@ -103,9 +101,9 @@ async def fetch_proxies():
                 valid = await validate_proxies(raw_proxies)
                 for proxy in valid:
                     await proxy_pool.put(proxy)
-                print(f"[INFO] Loaded {len(valid)} valid proxies.")
+                logging.info(f"[INFO] Loaded {len(valid)} valid proxies.")
         except Exception as e:
-            print("[ERROR] Failed to fetch proxies:", e)
+            logging.error(f"[ERROR] Failed to fetch proxies: {e}")
 
 async def validate_proxies(proxies):
     async def test(proxy):
@@ -129,17 +127,14 @@ async def check_username(session, proxy, username):
         async with session.get(BASE_URL.format(username), proxy=proxy_url, headers=headers, timeout=10) as resp:
             if resp.status == 404:
                 if username not in available_usernames:
-                    print(f"[AVAILABLE] @{username}")
+                    logging.info(f"[AVAILABLE] @{username}")
                     available_usernames.add(username)
                     await send_telegram(username)
             elif resp.status in (429, 403):
-                # Rate limit or forbidden, penalize proxy
                 await asyncio.sleep(5)
     except Exception:
-        # proxy failure or network issues
         pass
     finally:
-        # Give proxies a break to avoid bans
         await asyncio.sleep(random.uniform(1.5, 3.5))
         await proxy_pool.put(proxy)
 
@@ -151,40 +146,41 @@ async def checker_loop():
     async with aiohttp.ClientSession(connector=connector) as session:
         while checking_active:
             if proxy_pool.empty():
-                print("[INFO] Proxy pool empty, refetching...")
+                logging.info("[INFO] Proxy pool empty, refetching...")
                 await fetch_proxies()
                 await asyncio.sleep(3)
                 continue
             username = username_wordlists.pop() if username_wordlists else generate_username()
             proxy = await proxy_pool.get()
             asyncio.create_task(check_username(session, proxy, username))
-            await asyncio.sleep(random.uniform(0.3, 0.7))  # throttle requests slightly
+            await asyncio.sleep(random.uniform(0.3, 0.7))
 
 # --- FASTAPI WEBHOOK ---
 @app.post("/webhook")
 async def handle_webhook(request: Request):
     global checking_active
     data = await request.json()
+    logging.info(f"Received webhook: {data}")
     message = data.get("message", {})
     text = message.get("text", "")
     chat_id = str(message.get("chat", {}).get("id"))
 
     if chat_id != TELEGRAM_CHAT_ID:
-        return PlainTextResponse("Unauthorized", status_code=status.HTTP_403_FORBIDDEN)
+        return JSONResponse({"error": "Unauthorized"}, status_code=status.HTTP_403_FORBIDDEN)
 
     if text == "/start" and not checking_active:
         checking_active = True
         asyncio.create_task(checker_loop())
-        return PlainTextResponse("Started checking usernames.")
+        return JSONResponse({"status": "Started checking usernames."})
     elif text == "/stop":
         checking_active = False
-        return PlainTextResponse("Stopped checking.")
-    return PlainTextResponse("OK")
+        return JSONResponse({"status": "Stopped checking."})
+
+    return JSONResponse({"status": "OK"})
 
 # --- MAIN ---
 async def main():
     await fetch_proxies()
-    # Run FastAPI via uvicorn inside this script
     config = Config(app=app, host="0.0.0.0", port=8080, log_level="info")
     server = Server(config)
     await server.serve()
