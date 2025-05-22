@@ -2,6 +2,8 @@ import os
 import asyncio
 import aiohttp
 import time
+import random
+import string
 from collections import deque
 from datetime import datetime
 from fastapi import FastAPI, Request
@@ -9,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-# Load sensitive info from environment or placeholders
+# Load sensitive info from environment variables or use placeholders
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "your_telegram_token_here"
 TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID") or "your_chat_id_here")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY") or "your_webshare_api_key_here"
@@ -25,6 +27,14 @@ usernames_checked_info = {}  # username -> {available_since, last_released, last
 available_usernames_counts = {}  # username -> count of availability hits
 
 AVAILABLE_USERNAMES_FILE = "available_usernames.txt"
+
+# Small set of realistic User-Agents for rotation
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.131 Mobile Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+]
 
 # --- Telegram messaging helper ---
 async def send_telegram(text, reply_markup=None):
@@ -47,13 +57,11 @@ def log_available_username(username):
     count = available_usernames_counts.get(username, 0) + 1
     available_usernames_counts[username] = count
 
-    # Read existing lines
     lines = []
     if os.path.exists(AVAILABLE_USERNAMES_FILE):
         with open(AVAILABLE_USERNAMES_FILE, "r") as f:
             lines = f.readlines()
 
-    # Update or add the username line
     updated = False
     new_lines = []
     for line in lines:
@@ -88,8 +96,7 @@ async def fetch_proxies_webshare():
 async def validate_proxy(proxy):
     test_url = "https://www.tiktok.com"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
-                      " Chrome/114.0.0.0 Safari/537.36",
+        "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     }
@@ -124,13 +131,14 @@ async def refresh_and_validate_proxies():
     proxy_stats = new_proxy_stats
     await send_telegram(f"✅ Proxies refreshed and validated: {len(proxy_pool)} available.")
 
-# --- Username generation (example: random 4-letter lowercase) ---
+# --- Username generation: clean 4-letter lowercase (no vowels or repeats optionally) ---
 def generate_usernames_batch(batch_size=50):
-    import random
-    import string
+    # You can customize pattern or source wordlist here
     batch = []
+    chars = string.ascii_lowercase
     while len(batch) < batch_size:
-        username = ''.join(random.choices(string.ascii_lowercase, k=4))
+        # Example: avoid vowels to reduce taken usernames (optional)
+        username = ''.join(random.choices(chars, k=4))
         batch.append(username)
     return batch
 
@@ -138,8 +146,7 @@ def generate_usernames_batch(batch_size=50):
 async def check_username_availability(username: str, proxy: str = None):
     url = f"https://www.tiktok.com/@{username}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
-                      " Chrome/114.0.0.0 Safari/537.36",
+        "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     }
@@ -219,43 +226,4 @@ async def checker_loop():
 async def telegram_webhook(req: Request):
     data = await req.json()
     if "callback_query" in data:
-        callback = data["callback_query"]
-        user_id = callback["from"]["id"]
-        data_text = callback["data"]
-        message_id = callback["message"]["message_id"]
-        chat_id = callback["message"]["chat"]["id"]
-
-        if data_text.startswith("claim:"):
-            username = data_text.split("claim:")[1]
-            # Placeholder for claim logic
-            await send_telegram(f"User {user_id} claimed username: {username}")
-        elif data_text.startswith("skip:"):
-            username = data_text.split("skip:")[1]
-            await send_telegram(f"User {user_id} skipped username: {username}")
-
-    return JSONResponse(content={"ok": True})
-
-# --- Command endpoints for start/stop ---
-@app.post("/start")
-async def start_checker():
-    global checking_active
-    if checking_active:
-        return {"status": "already running"}
-    checking_active = True
-    asyncio.create_task(checker_loop())
-    return {"status": "checker started"}
-
-@app.post("/stop")
-async def stop_checker():
-    global checking_active
-    checking_active = False
-    return {"status": "checker stopping"}
-
-# --- Run Uvicorn (only when running as main) ---
-if __name__ == "__main__":
-    import uvicorn
-    import traceback
-    try:
-        uvicorn.run(app, host="0.0.0.0", port=8000)
-    except Exception:
-        traceback.print_exc()
+        callback = data
