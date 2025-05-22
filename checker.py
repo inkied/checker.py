@@ -6,34 +6,28 @@ import random
 import string
 from collections import deque
 from datetime import datetime
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-# Load from env or replace here
+# Environment variables or hardcoded placeholders
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "your_telegram_token_here"
 TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID") or "your_chat_id_here")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY") or "your_webshare_api_key_here"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or "https://yourdomain.com/webhook"
 
 telegram_api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 checking_active = False
 proxy_pool = deque()
-available_usernames_counts = {}
 usernames_batch_current = []
 usernames_checked_info = {}
+available_usernames_counts = {}
 
 AVAILABLE_USERNAMES_FILE = "available_usernames.txt"
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
-    "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.131 Mobile Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-]
-
-# --- Telegram message sender ---
+# Send Telegram message helper
 async def send_telegram(text, reply_markup=None):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -48,77 +42,56 @@ async def send_telegram(text, reply_markup=None):
         async with session.post(f"{telegram_api_url}/sendMessage", json=payload) as resp:
             return await resp.json()
 
-# --- Log available usernames to file ---
-def log_available_username(username):
-    now = int(time.time())
-    count = available_usernames_counts.get(username, 0) + 1
-    available_usernames_counts[username] = count
+# Set Telegram webhook on startup
+@app.on_event("startup")
+async def startup_event():
+    async with aiohttp.ClientSession() as session:
+        set_url = f"{telegram_api_url}/setWebhook"
+        params = {"url": WEBHOOK_URL}
+        async with session.post(set_url, params=params) as resp:
+            res = await resp.json()
+            if res.get("ok"):
+                print(f"Webhook set successfully: {WEBHOOK_URL}")
+            else:
+                print(f"Failed to set webhook: {res}")
 
-    lines = []
-    if os.path.exists(AVAILABLE_USERNAMES_FILE):
-        with open(AVAILABLE_USERNAMES_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-    updated = False
-    new_lines = []
-    for line in lines:
-        if line.startswith(f"{username} "):
-            new_line = f"{username} — available hits: {count} — last seen: {datetime.utcfromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-            new_lines.append(new_line)
-            updated = True
-        else:
-            new_lines.append(line)
-    if not updated:
-        new_line = f"{username} — available hits: {count} — last seen: {datetime.utcfromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-        new_lines.append(new_line)
-
-    with open(AVAILABLE_USERNAMES_FILE, "w", encoding="utf-8") as f:
-        f.writelines(new_lines)
-
-# --- Fetch proxies from Webshare ---
+# Proxy scraping & validation
 async def fetch_proxies_webshare():
     url = "https://proxy.webshare.io/api/proxy/list/"
     headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
     params = {"page_size": 100}
     proxies = []
     async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, params=params) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    for p in data.get("results", []):
-                        proxy_str = f"http://{p['username']}:{p['password']}@{p['proxy_address']}:{p['ports']['http']}"
-                        proxies.append(proxy_str)
-        except Exception:
-            pass
+        async with session.get(url, headers=headers, params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                for p in data.get("results", []):
+                    proxy_str = f"http://{p['username']}:{p['password']}@{p['proxy_address']}:{p['ports']['http']}"
+                    proxies.append(proxy_str)
     return proxies
 
-# --- Validate proxies by pinging TikTok homepage ---
 async def validate_proxy(proxy):
-    url = "https://www.tiktok.com"
+    test_url = "https://www.tiktok.com"
     headers = {
-        "User-Agent": random.choice(USER_AGENTS),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+                      " Chrome/114.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     }
     timeout = aiohttp.ClientTimeout(total=10)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, proxy=proxy, headers=headers) as resp:
-                if resp.status == 200:
-                    return True
+            async with session.get(test_url, proxy=proxy, headers=headers) as resp:
+                return resp.status == 200
     except:
-        pass
-    return False
+        return False
 
 async def refresh_and_validate_proxies():
     global proxy_pool
     await send_telegram("🔄 Refreshing proxies from Webshare...")
     proxies = await fetch_proxies_webshare()
     valid_proxies = deque()
-    tasks = []
-    for p in proxies:
-        tasks.append(validate_proxy(p))
+    tasks = [validate_proxy(p) for p in proxies]
     results = await asyncio.gather(*tasks)
     for i, valid in enumerate(results):
         if valid:
@@ -126,20 +99,20 @@ async def refresh_and_validate_proxies():
     proxy_pool = valid_proxies
     await send_telegram(f"✅ Proxies refreshed and validated: {len(proxy_pool)} available.")
 
-# --- Generate random 4-letter usernames ---
+# Username generation
 def generate_usernames_batch(batch_size=50):
-    chars = string.ascii_lowercase
     batch = []
     while len(batch) < batch_size:
-        username = ''.join(random.choices(chars, k=4))
+        username = ''.join(random.choices(string.ascii_lowercase, k=4))
         batch.append(username)
     return batch
 
-# --- Check TikTok username availability ---
+# Check TikTok username availability
 async def check_username_availability(username: str, proxy: str = None):
     url = f"https://www.tiktok.com/@{username}"
     headers = {
-        "User-Agent": random.choice(USER_AGENTS),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+                      " Chrome/114.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     }
@@ -148,11 +121,37 @@ async def check_username_availability(username: str, proxy: str = None):
             async with session.get(url, proxy=proxy, headers=headers, timeout=10) as resp:
                 if resp.status == 404:
                     return True
-                return False
+                else:
+                    return False
     except:
         return False
 
-# --- Main checker loop ---
+# Log available usernames to file and count hits
+def log_available_username(username):
+    now = int(time.time())
+    count = available_usernames_counts.get(username, 0) + 1
+    available_usernames_counts[username] = count
+
+    lines = []
+    if os.path.exists(AVAILABLE_USERNAMES_FILE):
+        with open(AVAILABLE_USERNAMES_FILE, "r") as f:
+            lines = f.readlines()
+
+    updated = False
+    new_lines = []
+    for line in lines:
+        if line.startswith(f"{username} "):
+            new_lines.append(f"{username} — hits: {count} — last seen: {datetime.utcfromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
+            updated = True
+        else:
+            new_lines.append(line)
+    if not updated:
+        new_lines.append(f"{username} — hits: {count} — last seen: {datetime.utcfromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
+
+    with open(AVAILABLE_USERNAMES_FILE, "w") as f:
+        f.writelines(new_lines)
+
+# Checker loop
 async def checker_loop():
     global checking_active, usernames_batch_current
     await send_telegram("🟢 Checker started.")
@@ -169,105 +168,74 @@ async def checker_loop():
             await send_telegram(f"🔄 Loaded new batch of {len(usernames_batch_current)} usernames")
 
         username = usernames_batch_current.pop(0)
-        proxy = None
-        try:
-            proxy = proxy_pool[0]
-            proxy_pool.rotate(-1)
-        except IndexError:
-            proxy = None
+        proxy = proxy_pool[0]
+        proxy_pool.rotate(-1)
 
         available = await check_username_availability(username, proxy)
         now_ts = int(time.time())
         if available:
-            count = available_usernames_counts.get(username, 0) + 1
-            available_usernames_counts[username] = count
+            if username not in usernames_checked_info:
+                usernames_checked_info[username] = {"available_since": now_ts, "last_checked": now_ts}
+            else:
+                usernames_checked_info[username]["last_checked"] = now_ts
+
             log_available_username(username)
 
-            msg = (f"✅ Username *{username}* is available!\n"
-                   f"Availability hits: {count}\n"
-                   f"[Claim](https://www.tiktok.com/@{username})")
-
+            msg = f"✅ Username *{username}* is available!\nAvailability hits: {available_usernames_counts[username]}"
             keyboard = {
                 "inline_keyboard": [
-                    [{"text": "Claim", "url": f"https://www.tiktok.com/@{username}"}],
+                    [{"text": "Claim", "callback_data": f"claim:{username}"}],
+                    [{"text": "Skip", "callback_data": f"skip:{username}"}]
                 ]
             }
             await send_telegram(msg, reply_markup=keyboard)
+        else:
+            usernames_checked_info.pop(username, None)
 
         await asyncio.sleep(1)
     await send_telegram("⏹️ Checker stopped.")
 
-# --- Handle Telegram commands and button callbacks ---
+# Telegram webhook for commands & button callbacks
 @app.post("/webhook")
-async def telegram_webhook(req: Request, background_tasks: BackgroundTasks):
+async def telegram_webhook(req: Request):
+    global checking_active
     data = await req.json()
 
-    # Handle commands sent via chat message
-    if "message" in data and "text" in data["message"]:
-        text = data["message"]["text"]
-        chat_id = data["message"]["chat"]["id"]
-        if chat_id != TELEGRAM_CHAT_ID:
-            return JSONResponse({"ok": True})
+    if "message" in data:
+        message = data["message"]
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "").lower()
 
-        if text == "/startchecker":
-            global checking_active
+        if chat_id != TELEGRAM_CHAT_ID:
+            return JSONResponse({"ok": True})  # Ignore unknown chats
+
+        if text == "/start":
             if not checking_active:
                 checking_active = True
-                background_tasks.add_task(checker_loop)
-                await send_telegram("▶️ Checker started.")
+                asyncio.create_task(checker_loop())
+                await send_telegram("Checker started.")
             else:
-                await send_telegram("⚠️ Checker already running.")
-
-        elif text == "/stopchecker":
+                await send_telegram("Checker is already running.")
+        elif text == "/stop":
             checking_active = False
-            await send_telegram("⏹️ Checker stopped.")
-
+            await send_telegram("Checker stopping...")
         elif text == "/refreshproxies":
-            background_tasks.add_task(refresh_and_validate_proxies)
-
+            await refresh_and_validate_proxies()
         else:
-            await send_telegram("Commands:\n/startchecker\n/stopchecker\n/refreshproxies")
+            await send_telegram("Commands:\n/start\n/stop\n/refreshproxies")
 
-    # Handle inline callback queries (Claim / Skip buttons)
-    if "callback_query" in data:
+    elif "callback_query" in data:
         callback = data["callback_query"]
-        data_str = callback.get("data", "")
-        from_id = callback["from"]["id"]
-        message_id = callback["message"]["message_id"]
-        chat_id = callback["message"]["chat"]["id"]
+        data_text = callback["data"]
+        username = data_text.split(":")[1]
+        if data_text.startswith("claim:"):
+            await send_telegram(f"🟢 Claim request received for username: {username}")
+        elif data_text.startswith("skip:"):
+            await send_telegram(f"⏭ Skipped username: {username}")
 
-        # Only allow authorized chat
-        if chat_id != TELEGRAM_CHAT_ID:
-            return JSONResponse({"ok": True})
-
-        # For demo, just answer callback query
-        # You can add real claim/skip logic here
-        if data_str.startswith("claim:"):
-            username = data_str.split(":")[1]
-            await send_telegram(f"Claim requested for username: {username}")
-        elif data_str.startswith("skip:"):
-            username = data_str.split(":")[1]
-            await send_telegram(f"Skip requested for username: {username}")
-
-        # Respond to Telegram so loading spinner disappears
+        # Acknowledge the callback to Telegram
+        callback_id = callback["id"]
         async with aiohttp.ClientSession() as session:
-            await session.post(f"{telegram_api_url}/answerCallbackQuery", json={
-                "callback_query_id": callback["id"],
-                "text": "Action received!",
-                "show_alert": False,
-            })
+            await session.post(f"{telegram_api_url}/answerCallbackQuery", json={"callback_query_id": callback_id})
 
     return JSONResponse({"ok": True})
-
-# --- Root endpoint for testing ---
-@app.get("/")
-def root():
-    return {"status": "TikTok Checker bot running"}
-
-# --- On startup, refresh proxies ---
-@app.on_event("startup")
-async def startup_event():
-    await refresh_and_validate_proxies()
-
-# To run locally:
-# uvicorn this_script_name:app --host 0.0.0.0 --port 8000
