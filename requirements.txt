@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 aiohttp
 python-dotenv
+httpx
+python-dotenv
+requests
+python-telegram-bot
