@@ -1,4 +1,4 @@
-fastapi>=0.88.0
-uvicorn[standard]>=0.20.0
-aiohttp>=3.8.1
-requests
+fastapi
+uvicorn[standard]
+aiohttp
+python-dotenv
