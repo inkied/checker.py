@@ -2,312 +2,279 @@ import os
 import re
 import asyncio
 import aiohttp
-import random
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+import uvicorn
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
 TWO_CAPTCHA_KEY = os.getenv("TWO_CAPTCHA_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or "https://your-railway-app.up.railway.app/webhook"
 
 app = FastAPI()
 
-# Globals
 checking = False
-raw_proxies = []
+proxies = []
 username_queue = asyncio.Queue()
-checked_usernames = set()
-failed_usernames = set()
-in_progress_usernames = set()
-proxy_queue = asyncio.Queue()  # queue of valid proxies ready to be assigned
-proxy_refresh_interval = 600  # seconds (10 minutes)
-CONCURRENCY = 12
+proxy_lock = asyncio.Lock()
 
-user_agents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
-]
-
-# Load usernames from wordlist.txt file
 def load_wordlist(file_path="wordlist.txt"):
     if not os.path.isfile(file_path):
         print(f"Wordlist file {file_path} not found!")
         return []
     with open(file_path, "r", encoding="utf-8") as f:
-        words = [line.strip() for line in f if line.strip()]
-    print(f"Loaded {len(words)} usernames from wordlist.")
-    return words
-
+        return [line.strip() for line in f if line.strip()]
 
 async def send_telegram_message(text, reply_markup=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as resp:
             return await resp.json()
 
+async def answer_callback_query(callback_id, text=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_id}
+    if text:
+        payload["text"] = text
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            return await resp.json()
+
+async def set_telegram_webhook():
+    print(f"Setting Telegram webhook to {WEBHOOK_URL}...")
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    params = {"url": WEBHOOK_URL}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as resp:
+            result = await resp.json()
+            if result.get("ok"):
+                print("Telegram webhook set successfully.")
+            else:
+                print(f"Failed to set webhook: {result}")
 
 async def scrape_proxies():
     print("Scraping proxies from Webshare...")
     url = "https://proxy.webshare.io/api/proxy/list/"
     headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
-    scraped = []
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                for p in data.get("results", []):
-                    ip = p.get("proxy_address")
-                    port = p.get("proxy_port")
-                    ptype = p.get("proxy_type").lower()
-                    if ip and port and ptype:
-                        scraped.append(f"{ptype}://{ip}:{port}")
+                results = data.get("results", [])
+                scraped = [f"{p['proxy_type'].lower()}://{p['proxy_address']}:{p['proxy_port']}" for p in results if p.get("proxy_address") and p.get("proxy_port")]
                 print(f"Scraped {len(scraped)} proxies.")
+                return scraped
             else:
-                print(f"Failed to scrape proxies: HTTP {resp.status}")
-    return scraped
+                print(f"Failed to scrape proxies, status {resp.status}")
+                return []
 
-
-async def validate_proxy(proxy: str, session: aiohttp.ClientSession) -> bool:
+async def validate_proxy(proxy):
+    test_url = "https://www.tiktok.com"
     try:
-        headers = {"User-Agent": random.choice(user_agents)}
-        async with session.get("https://www.tiktok.com", proxy=proxy, headers=headers, timeout=10) as resp:
-            return resp.status == 200
+        async with aiohttp.ClientSession() as session:
+            async with session.get(test_url, proxy=proxy, timeout=5) as resp:
+                return resp.status == 200
     except Exception:
         return False
-
 
 async def validate_proxies(raw_proxies):
     print("Validating proxies...")
     valid = []
+    tasks = []
     sem = asyncio.Semaphore(20)
-    async with aiohttp.ClientSession() as session:
-        async def sem_validate(p):
-            async with sem:
-                if await validate_proxy(p, session):
+
+    async def sem_validate(p):
+        async with sem:
+            if re.match(r"^(http|socks4|socks5)://\d+\.\d+\.\d+\.\d+:\d+$", p):
+                if await validate_proxy(p):
                     valid.append(p)
-        tasks = [asyncio.create_task(sem_validate(p)) for p in raw_proxies if re.match(r"^(http|socks4|socks5)://\d+\.\d+\.\d+\.\d+:\d+$", p)]
-        await asyncio.gather(*tasks)
+
+    for p in raw_proxies:
+        tasks.append(asyncio.create_task(sem_validate(p)))
+    await asyncio.gather(*tasks)
     print(f"Validated {len(valid)} proxies.")
     return valid
 
-
-async def is_captcha_page(text: str) -> bool:
-    signs = ["captcha", "g-recaptcha", "hcaptcha", "verify you are human"]
-    lower = text.lower()
-    return any(sign in lower for sign in signs)
-
-
-async def solve_captcha(site_key: str, url: str) -> str:
-    # 2Captcha solving for recaptcha v2, returns token or empty string
+async def solve_captcha(site_key, url, max_retries=20, sleep_interval=5):
     async with aiohttp.ClientSession() as session:
-        data = {
-            "key": TWO_CAPTCHA_KEY,
-            "method": "userrecaptcha",
-            "googlekey": site_key,
-            "pageurl": url,
-            "json": 1,
-        }
-        async with session.post("http://2captcha.com/in.php", data=data) as resp:
+        submit_url = f"http://2captcha.com/in.php?key={TWO_CAPTCHA_KEY}&method=userrecaptcha&googlekey={site_key}&pageurl={url}&json=1"
+        async with session.get(submit_url) as resp:
             res = await resp.json()
             if res.get("status") != 1:
-                print("2Captcha submit error:", res)
-                return ""
+                print(f"2Captcha submit failed: {res}")
+                return None
             captcha_id = res.get("request")
+        get_url = f"http://2captcha.com/res.php?key={TWO_CAPTCHA_KEY}&action=get&id={captcha_id}&json=1"
 
-        for _ in range(24):
-            await asyncio.sleep(5)
-            params = {
-                "key": TWO_CAPTCHA_KEY,
-                "action": "get",
-                "id": captcha_id,
-                "json": 1,
-            }
-            async with session.get("http://2captcha.com/res.php", params=params) as resp:
+        for attempt in range(max_retries):
+            await asyncio.sleep(sleep_interval)
+            async with session.get(get_url) as resp:
                 res = await resp.json()
                 if res.get("status") == 1:
                     return res.get("request")
                 elif res.get("request") == "CAPCHA_NOT_READY":
+                    print(f"Captcha not ready, retry {attempt+1}/{max_retries}...")
                     continue
                 else:
-                    print("2Captcha error:", res)
+                    print(f"2Captcha error: {res}")
                     break
-    return ""
+    return None
 
+def extract_captcha_site_key(html_text):
+    m = re.search(r'data-sitekey="([0-9a-zA-Z_-]+)"', html_text)
+    if m:
+        return m.group(1)
+    m = re.search(r"sitekey\s*[:=]\s*['\"]([0-9a-zA-Z_-]+)['\"]", html_text)
+    if m:
+        return m.group(1)
+    return None
 
-async def check_username(session: aiohttp.ClientSession, username: str, proxy: str = None) -> bool:
+async def check_username(session, username, proxy=None):
     url = f"https://www.tiktok.com/@{username}"
-    headers = {"User-Agent": random.choice(user_agents)}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+
     try:
-        kwargs = {"headers": headers, "timeout": 15}
-        if proxy:
-            kwargs["proxy"] = proxy
-        async with session.get(url, **kwargs) as resp:
+        async with session.get(url, headers=headers, proxy=proxy, timeout=15) as resp:
             text = await resp.text()
             if resp.status == 404:
                 return True
-            elif await is_captcha_page(text):
-                if TWO_CAPTCHA_KEY:
-                    # Example site key - may need update for TikTok's actual captcha site key
-                    site_key = "6Lc_aX0UAAAAABx7H3Dxz-wGZa8H7n50bXpt_E62"
-                    captcha_token = await solve_captcha(site_key, url)
-                    if captcha_token:
-                        data = {"g-recaptcha-response": captcha_token}
-                        async with session.get(url, headers=headers, proxy=proxy, timeout=15, params=data) as retry_resp:
-                            return retry_resp.status == 404
-                return False
-            else:
-                return False
-    except Exception:
+
+            if "captcha" in text.lower() or resp.status in [403, 429]:
+                site_key = extract_captcha_site_key(text)
+                if site_key and TWO_CAPTCHA_KEY:
+                    print(f"Captcha detected for {username}, solving...")
+                    token = await solve_captcha(site_key, url)
+                    if token:
+                        headers["x-recaptcha-token"] = token
+                        async with session.get(url, headers=headers, proxy=proxy, timeout=15) as resp2:
+                            if resp2.status == 404:
+                                return True
+                            else:
+                                return False
+                else:
+                    print(f"Captcha detected but missing site key or 2Captcha API key for {username}")
+                    return False
+
+            return False
+    except Exception as e:
+        print(f"Error checking {username}: {e}")
         return False
 
+async def get_proxy():
+    global proxies
+    async with proxy_lock:
+        if not proxies:
+            return None
+        proxy = proxies.pop(0)
+        proxies.append(proxy)
+        return proxy
 
 async def worker():
+    global checking
     async with aiohttp.ClientSession() as session:
         while checking:
             try:
                 username = await asyncio.wait_for(username_queue.get(), timeout=10)
             except asyncio.TimeoutError:
                 continue
-            in_progress_usernames.add(username)
 
-            try:
-                proxy = await asyncio.wait_for(proxy_queue.get(), timeout=15)
-            except asyncio.TimeoutError:
-                # No proxy available, requeue username and wait
+            proxy = await get_proxy()
+            available = await check_username(session, username, proxy)
+
+            if not available and proxy:
+                async with proxy_lock:
+                    if proxy in proxies:
+                        proxies.remove(proxy)
                 await username_queue.put(username)
-                in_progress_usernames.discard(username)
-                await asyncio.sleep(5)
-                continue
-
-            available = False
-            try:
-                available = await check_username(session, username, proxy)
-            except Exception:
-                available = False
-
-            # Return proxy back to proxy queue if it is still valid by quick validation
-            if proxy:
-                is_valid = await validate_proxy(proxy, session)
-                if is_valid:
-                    await proxy_queue.put(proxy)
-                else:
-                    print(f"Proxy failed and removed: {proxy}")
-
-            in_progress_usernames.discard(username)
-
-            if available:
-                await send_telegram_message(f"✅ Username available: <b>{username}</b>")
-                checked_usernames.add(username)
             else:
-                # Retry username with a new proxy (max 2 retries)
-                if username not in failed_usernames:
-                    failed_usernames.add(username)
-                    await username_queue.put(username)  # retry once more
-                else:
-                    checked_usernames.add(username)
-
-            username_queue.task_done()
-            await asyncio.sleep(random.uniform(0.5, 1.5))
-
+                username_queue.task_done()
+                if available:
+                    buttons = {
+                        "inline_keyboard": [
+                            [
+                                {"text": "Claim", "callback_data": f"claim:{username}"},
+                                {"text": "Skip", "callback_data": f"skip:{username}"},
+                            ]
+                        ]
+                    }
+                    await send_telegram_message(f"✅ Username available: <b>{username}</b>", reply_markup=buttons)
 
 async def fill_queue(usernames):
     for u in usernames:
-        if u not in checked_usernames:
-            await username_queue.put(u)
-
-
-async def refresh_proxies_loop():
-    global raw_proxies
-    while True:
-        if checking:
-            print("Refreshing proxies...")
-            raw_proxies = await scrape_proxies()
-            valid_proxies = await validate_proxies(raw_proxies)
-
-            # Clear proxy_queue and refill with valid proxies
-            while not proxy_queue.empty():
-                try:
-                    proxy_queue.get_nowait()
-                    proxy_queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
-            for p in valid_proxies:
-                await proxy_queue.put(p)
-
-            print(f"Proxy pool refreshed with {len(valid_proxies)} proxies.")
-        await asyncio.sleep(proxy_refresh_interval)
-
+        await username_queue.put(u)
 
 @app.post("/webhook")
 async def telegram_webhook(req: Request):
-    global checking
-
     data = await req.json()
+    if "callback_query" in data:
+        cq = data["callback_query"]
+        cid = cq["id"]
+        data_text = cq["data"]
+        if data_text.startswith("claim:"):
+            username = data_text.split("claim:")[1]
+            await answer_callback_query(cid, text=f"Trying to claim {username}...")
+            await send_telegram_message(f"🟢 Trying to claim username: {username}")
+        elif data_text.startswith("skip:"):
+            username = data_text.split("skip:")[1]
+            await answer_callback_query(cid, text=f"Skipped {username}")
+        return JSONResponse({"ok": True})
+
     message = data.get("message") or data.get("edited_message")
-    if not message or "text" not in message:
-        return JSONResponse({"ok": True})
+    if message and "text" in message:
+        text = message["text"].lower()
+        chat_id = message["chat"]["id"]
+        if chat_id != CHAT_ID:
+            return JSONResponse({"ok": True})
 
-    text = message["text"].strip().lower()
-    chat_id = message["chat"]["id"]
-    if chat_id != CHAT_ID:
-        return JSONResponse({"ok": True})
-
-    if text == "/start":
-        if checking:
-            await send_telegram_message("Checker is already running.")
-        else:
-            checking = True
-            # Reload proxies first
-            global raw_proxies
-            raw_proxies = await scrape_proxies()
-            valid_proxies = await validate_proxies(raw_proxies)
-            # Fill proxy queue with valid proxies
-            for p in valid_proxies:
-                await proxy_queue.put(p)
-            # Load usernames
-            wordlist = load_wordlist()
-            await fill_queue(wordlist)
-            await send_telegram_message(f"Started checker with {proxy_queue.qsize()} valid proxies and {username_queue.qsize()} usernames queued.")
-            # Start workers
-            for _ in range(CONCURRENCY):
-                asyncio.create_task(worker())
-            # Start proxy refresher task
-            asyncio.create_task(refresh_proxies_loop())
-
-    elif text == "/stop":
-        if checking:
+        global checking
+        if text == "/start":
+            if checking:
+                await send_telegram_message("Already running.")
+            else:
+                checking = True
+                await send_telegram_message("Starting TikTok username checking...")
+                asyncio.create_task(main_check_loop())
+        elif text == "/stop":
             checking = False
-            await send_telegram_message("Stopped the checker.")
-        else:
-            await send_telegram_message("Checker is not running.")
-
-    elif text == "/proxies":
-        msg = f"Total proxies scraped: {len(raw_proxies)}\nProxies in pool: {proxy_queue.qsize()}"
-        await send_telegram_message(msg)
-
-    elif text == "/usernames":
-        queued = username_queue.qsize()
-        in_prog = len(in_progress_usernames)
-        failed = len(failed_usernames)
-        msg = (f"Usernames queued: {queued}\n"
-               f"Usernames in progress: {in_prog}\n"
-               f"Failed usernames: {failed}")
-        await send_telegram_message(msg)
-
+            await send_telegram_message("Stopped TikTok username checking.")
+        elif text == "/proxies":
+            await send_telegram_message(f"Proxies available: {len(proxies)}")
+        elif text == "/usernames":
+            in_queue = username_queue.qsize()
+            await send_telegram_message(f"Usernames in queue: {in_queue}")
     return JSONResponse({"ok": True})
 
+async def main_check_loop():
+    global proxies
+    raw = await scrape_proxies()
+    proxies = await validate_proxies(raw)
+
+    if not proxies:
+        await send_telegram_message("⚠️ No valid proxies found. Stopping.")
+        return
+
+    usernames = load_wordlist()
+    if not usernames:
+        await send_telegram_message("⚠️ No usernames to check. Stopping.")
+        return
+
+    await fill_queue(usernames)
+    workers = [asyncio.create_task(worker()) for _ in range(20)]
+    await username_queue.join()
+    global checking
+    checking = False
+    await send_telegram_message("Finished checking all usernames.")
 
 if __name__ == "__main__":
-    import uvicorn
-    print("Starting server...")
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    import nest_asyncio
+    nest_asyncio.apply()
+    loop = asyncio.get_event_loop()
+    loop.create_task(set_telegram_webhook())
+    uvicorn.run checker:app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
