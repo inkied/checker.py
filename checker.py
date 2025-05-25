@@ -1,174 +1,218 @@
 import os
+import re
 import asyncio
 import aiohttp
-import random
-import time
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+import uvicorn
+from typing import Set, List
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
+TWO_CAPTCHA_KEY = os.getenv("TWO_CAPTCHA_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or "https://checkerpy-production-a7e1.up.railway.app/webhook"
 
 app = FastAPI()
 
-# Global state
+# Globals
 checking = False
-user_queue = asyncio.Queue()
-proxies = []
-working_proxies = []
+proxies: List[str] = []
+username_queue: asyncio.Queue = asyncio.Queue()
+active_tasks = set()
 
-# Load username wordlist or fallback to generator
-async def load_wordlist(file_path="usernames.txt"):
-    try:
-        with open(file_path, "r") as f:
-            names = [line.strip() for line in f if line.strip()]
-            if names:
-                return names
-    except Exception:
-        pass
-    # fallback: generate some dummy usernames
-    return [f"user{str(i).zfill(5)}" for i in range(100000)]
+# Load themed wordlist (full words, no length limit)
+def load_wordlist(file_path="wordlist.txt") -> List[str]:
+    if not os.path.isfile(file_path):
+        print(f"Wordlist file {file_path} not found!")
+        return []
+    with open(file_path, "r", encoding="utf-8") as f:
+        words = [line.strip() for line in f if line.strip()]
+    print(f"Loaded {len(words)} usernames from wordlist.")
+    return words
 
-# Scrape 100k+ TikTok users asynchronously (fake example)
-async def scrape_users():
-    print("Starting user scraping...")
-    scraped = 0
-    async with aiohttp.ClientSession() as session:
-        # Fake scraping loop: replace with real scraper API or logic
-        while scraped < 100000:
-            # For example, fake usernames user00000 to user99999
-            await user_queue.put(f"user{str(scraped).zfill(5)}")
-            scraped += 1
-    print("User scraping complete.")
-
-# Fetch proxies from Webshare, no country filter, limit 200
-async def scrape_proxies():
-    global proxies
-    url = "https://proxy.webshare.io/api/proxy/list/"
-    headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    proxies = []
-                    for item in data.get("results", []):
-                        proxy = f"http://{item['proxy_address']}:{item['port']}"
-                        proxies.append(proxy)
-                    print(f"Scraped {len(proxies)} proxies.")
-                else:
-                    print(f"Failed to fetch proxies: {r.status}")
-        except Exception as e:
-            print(f"Error scraping proxies: {e}")
-
-# Check if a proxy works by measuring speed with a simple test request
-async def test_proxy(proxy):
-    test_url = "https://www.tiktok.com/"
-    try:
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            start = time.perf_counter()
-            async with session.get(test_url, proxy=proxy) as resp:
-                if resp.status == 200:
-                    elapsed = time.perf_counter() - start
-                    return proxy, elapsed
-    except:
-        pass
-    return proxy, None
-
-# Validate proxies by speed, keep only working ones sorted by speed
-async def validate_proxies():
-    global working_proxies
-    print("Validating proxies...")
-    tasks = [test_proxy(p) for p in proxies]
-    results = await asyncio.gather(*tasks)
-    working = [(p, s) for p, s in results if s is not None]
-    working.sort(key=lambda x: x[1])
-    working_proxies = [p for p, s in working]
-    print(f"{len(working_proxies)} proxies are working after validation.")
-
-# Send message to Telegram chat
-async def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+# Telegram API helpers
+async def send_telegram_message(text, reply_markup=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True,
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     async with aiohttp.ClientSession() as session:
-        try:
-            await session.post(url, json=payload)
-        except Exception as e:
-            print(f"Telegram send error: {e}")
+        async with session.post(url, json=payload) as resp:
+            return await resp.json()
 
-# Check username availability (dummy example, replace with real TikTok check)
-async def check_username(username, proxy=None):
-    # Simulate username check delay and random availability
-    await asyncio.sleep(random.uniform(0.2, 0.7))
-    # Fake: randomly 1% available
-    available = random.random() < 0.01
-    return username, available
+async def answer_callback_query(callback_id, text=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_id}
+    if text:
+        payload["text"] = text
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            return await resp.json()
 
-# Worker task to consume usernames and check them
-async def checker_worker():
-    global checking
-    while checking:
-        try:
-            username = await asyncio.wait_for(user_queue.get(), timeout=10)
-        except asyncio.TimeoutError:
-            continue
-        # Rotate proxy round-robin
-        proxy = None
-        if working_proxies:
-            proxy = random.choice(working_proxies)
-        username, available = await check_username(username, proxy)
-        if available:
-            await send_telegram_message(f"✅ Username available: <b>{username}</b>")
-        user_queue.task_done()
+async def set_telegram_webhook():
+    print(f"Setting Telegram webhook to {WEBHOOK_URL}...")
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    params = {"url": WEBHOOK_URL}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as resp:
+            result = await resp.json()
+            if result.get("ok"):
+                print(f"Telegram webhook set successfully.")
+            else:
+                print(f"Failed to set webhook: {result}")
 
-# Telegram update schema
-class Update(BaseModel):
-    message: dict = None
+# Proxy scraping from Webshare
+async def scrape_proxies():
+    print("Scraping proxies from Webshare...")
+    url = "https://proxy.webshare.io/api/proxy/list/"
+    headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
+    proxies_local = []
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                for proxy_data in data.get("results", []):
+                    ip = proxy_data.get("proxy_address")
+                    port = proxy_data.get("proxy_port")
+                    ptype = proxy_data.get("proxy_type").lower()
+                    if ip and port and ptype:
+                        proxies_local.append(f"{ptype}://{ip}:{port}")
+                print(f"Scraped {len(proxies_local)} proxies.")
+            else:
+                print(f"Failed to scrape proxies, status {resp.status}")
+    return proxies_local
 
-@app.post(f"/telegram_webhook/{BOT_TOKEN}")
-async def telegram_webhook(update: Update):
-    global checking
-    msg = update.message
-    if not msg or "text" not in msg:
-        return {"ok": True}
-    text = msg["text"].strip()
-    chat_id = msg["chat"]["id"]
-    if chat_id != int(CHAT_ID):
-        return {"ok": True}
+# Validate proxies (simple TCP connect test could be added; here just basic filtering)
+async def validate_proxies(raw_proxies):
+    print("Validating proxies...")
+    valid = []
+    for p in raw_proxies:
+        # Basic format validation
+        if re.match(r"^(http|socks4|socks5)://\d+\.\d+\.\d+\.\d+:\d+$", p):
+            valid.append(p)
+    print(f"Validated {len(valid)} proxies.")
+    return valid
 
-    if text == "/start":
-        if checking:
-            await send_telegram_message("Already running.")
-        else:
-            checking = True
-            await send_telegram_message("Started username checking.")
-            # Start tasks
-            asyncio.create_task(scrape_proxies())
-            asyncio.create_task(validate_proxies())
-            asyncio.create_task(scrape_users())
-            for _ in range(10):  # 10 workers for example
-                asyncio.create_task(checker_worker())
-    elif text == "/stop":
-        checking = False
-        await send_telegram_message("Stopped username checking.")
-    elif text == "/scrape":
-        if checking:
-            await send_telegram_message("Already running. Wait for scraping to finish.")
-        else:
-            checking = True
-            await send_telegram_message("Scraping 100k+ users now.")
-            asyncio.create_task(scrape_users())
-    else:
-        await send_telegram_message("Unknown command. Use /start, /stop or /scrape.")
-    return {"ok": True}
+# Username availability check for TikTok
+async def check_username(session, username, proxy=None):
+    url = f"https://www.tiktok.com/@{username}"
+    try:
+        proxy_opt = {"proxy": proxy} if proxy else {}
+        async with session.get(url, **proxy_opt, timeout=10) as resp:
+            if resp.status == 404:
+                return True  # Available
+            else:
+                return False
+    except Exception:
+        return False
+
+# Worker task: consume usernames from queue and check availability
+async def worker():
+    async with aiohttp.ClientSession() as session:
+        while checking:
+            try:
+                username = await asyncio.wait_for(username_queue.get(), timeout=10)
+            except asyncio.TimeoutError:
+                continue
+            proxy = None
+            if proxies:
+                proxy = proxies.pop(0)
+                proxies.append(proxy)  # rotate proxy
+            available = await check_username(session, username, proxy)
+            if available:
+                # Send Telegram alert with inline Claim/Skip buttons
+                buttons = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "Claim", "callback_data": f"claim:{username}"},
+                            {"text": "Skip", "callback_data": f"skip:{username}"},
+                        ]
+                    ]
+                }
+                await send_telegram_message(f"✅ Username available: <b>{username}</b>", reply_markup=buttons)
+            username_queue.task_done()
+
+# Fill queue with usernames from wordlist
+async def fill_queue(usernames):
+    for u in usernames:
+        await username_queue.put(u)
+
+# Handle Telegram webhook updates
+@app.post("/webhook")
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    # Handle callback query (button presses)
+    if "callback_query" in data:
+        cq = data["callback_query"]
+        cid = cq["id"]
+        data_text = cq["data"]
+        if data_text.startswith("claim:"):
+            username = data_text.split("claim:")[1]
+            await answer_callback_query(cid, text=f"Attempting to claim {username}...")
+            # Implement claim logic here or notify user
+            await send_telegram_message(f"🟢 Trying to claim username: {username}")
+        elif data_text.startswith("skip:"):
+            username = data_text.split("skip:")[1]
+            await answer_callback_query(cid, text=f"Skipped {username}")
+        return JSONResponse({"ok": True})
+    
+    # Handle commands or messages
+    message = data.get("message") or data.get("edited_message")
+    if message and "text" in message:
+        text = message["text"].lower()
+        chat_id = message["chat"]["id"]
+        if chat_id != int(CHAT_ID):
+            return JSONResponse({"ok": True})  # Ignore others
+        if text == "/start":
+            global checking
+            if checking:
+                await send_telegram_message("Already running.")
+            else:
+                checking = True
+                await send_telegram_message("Starting TikTok username checking...")
+                # Start proxy scraping and queue filling in background
+                asyncio.create_task(main_check_loop())
+        elif text == "/stop":
+            checking = False
+            await send_telegram_message("Stopped TikTok username checking.")
+    return JSONResponse({"ok": True})
+
+# Main check loop: scrape proxies, validate, fill username queue, run workers
+async def main_check_loop():
+    global proxies
+    # Scrape proxies
+    raw = await scrape_proxies()
+    proxies = await validate_proxies(raw)
+    if not proxies:
+        await send_telegram_message("⚠️ No valid proxies found. Stopping.")
+        return
+    # Load usernames
+    usernames = load_wordlist()
+    if not usernames:
+        await send_telegram_message("⚠️ No usernames to check. Stopping.")
+        return
+    # Fill queue
+    await fill_queue(usernames)
+    # Launch worker tasks
+    workers = [asyncio.create_task(worker()) for _ in range(20)]
+    # Wait until queue is empty or stopped
+    while checking and not username_queue.empty():
+        await asyncio.sleep(1)
+    # Cancel workers
+    for w in workers:
+        w.cancel()
+    await send_telegram_message("✅ Finished checking usernames.")
+
+# Startup event: set webhook
+@app.on_event("startup")
+async def startup_event():
+    await set_telegram_webhook()
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("checker:app", host="0.0.0.0", port=8000)
+    # Run with: uvicorn scriptname:app --host 0.0.0.0 --port 8000
+    uvicorn.run checker:app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
