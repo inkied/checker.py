@@ -6,6 +6,7 @@ import logging
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 import httpx
+from contextlib import asynccontextmanager
 
 load_dotenv()
 
@@ -13,9 +14,6 @@ telegram_api = os.getenv("TELEGRAM_API_TOKEN")
 chat_id = os.getenv("TELEGRAM_CHAT_ID")
 webshare_key = os.getenv("WEBSHARE_API_KEY")
 webhook_url = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.up.railway.app/webhook
-
-app = FastAPI()
-proxies = []
 
 logging.basicConfig(level=logging.INFO)
 
@@ -41,10 +39,15 @@ async def set_webhook():
         else:
             logging.error(f"Failed to set webhook: {resp.status_code} {await resp.text()}")
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup code here
     await set_webhook()
-    # You could start scraping proxies here or wait for /start command
+    yield
+    # Shutdown code here (if any)
+
+app = FastAPI(lifespan=lifespan)
+proxies = []
 
 async def validate_proxies(proxy_list):
     valid = []
