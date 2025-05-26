@@ -8,6 +8,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import aiohttp
+
+async def set_telegram_webhook():
+    webhook_url = os.getenv("WEBHOOK_PATH")  # e.g., https://checkerpy-production-a7e1.up.railway.app/webhook
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    payload = {"url": webhook_url}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(api_url, json=payload) as resp:
+            text = await resp.text()
+            if resp.status == 200:
+                print("✅ Webhook set successfully.")
+            else:
+                print(f"❌ Failed to set webhook: {resp.status}, {text}")
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
@@ -166,9 +180,9 @@ async def set_telegram_webhook():
                 print(f"❌ Failed to set webhook: {resp.status}, {result}")
 
 @app.on_event("startup")
-async def startup_event():
-    await fetch_proxies()
+async def startup():
     await set_telegram_webhook()
+    await fetch_proxies()
     print("✅ Startup complete.")
 
 if __name__ == "__main__":
