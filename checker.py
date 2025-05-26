@@ -26,42 +26,15 @@ if not all([TELEGRAM_API, CHAT_ID, WEBHOOK_URL, WEBSHARE_API_KEY]):
 # --- Globals ---
 app = FastAPI()
 checking = False
-check_letters_next = True  # To alternate username generation
 proxies = []
 proxy_index = 0
 proxy_retries = {}
 MAX_RETRIES = 3
 
 # --- Utilities ---
-def generate_clean_4letter():
-    vowels = 'aeiou'
-    consonants = 'bcdfghjklmnpqrstvwxyz'
-    return ''.join([
-        random.choice(consonants),
-        random.choice(vowels),
-        random.choice(consonants),
-        random.choice(vowels),
-    ])
-
-def generate_clean_4char():
-    letters = 'abcdefghijklmnopqrstuvwxyz'
-    digits = '0123456789'
-    chars = letters + digits
-    username = ''.join(random.choices(chars, k=4))
-    # Ensure at least one letter in username
-    if all(c.isdigit() for c in username):
-        pos = random.randint(0, 3)
-        username = username[:pos] + random.choice(letters) + username[pos+1:]
-    return username
-
-def generate_username():
-    global check_letters_next
-    if check_letters_next:
-        username = generate_clean_4letter()
-    else:
-        username = generate_clean_4char()
-    check_letters_next = not check_letters_next
-    return username
+def generate_random_4letter():
+    chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
+    return ''.join(random.choices(chars, k=4))
 
 async def send_telegram_message(message):
     async with aiohttp.ClientSession() as session:
@@ -103,7 +76,7 @@ async def check_username(username):
             async with session.get(url, proxy=proxy, timeout=10) as res:
                 logger.info(f"@{username} | Status: {res.status}")
                 if res.status == 404:
-                    await send_telegram_message(f"Available username: @{username}")
+                    await send_telegram_message(f"Available: @{username}")
     except Exception as e:
         logger.warning(f"Proxy failed: {proxy} | {str(e)}")
         proxy_retries[proxy] = proxy_retries.get(proxy, 0) + 1
@@ -111,10 +84,14 @@ async def check_username(username):
 async def start_checking():
     global checking
     checking = True
+    # Immediate first check
+    username = generate_random_4letter()
+    asyncio.create_task(check_username(username))
+
     while checking:
-        username = generate_username()
-        await check_username(username)
         await asyncio.sleep(random.uniform(0.4, 1.2))
+        username = generate_random_4letter()
+        asyncio.create_task(check_username(username))
 
 async def stop_checking():
     global checking
@@ -123,6 +100,7 @@ async def stop_checking():
 # --- Webhook Routes ---
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
+    global checking
     data = await request.json()
     message = data.get("message", {}).get("text", "")
     if message == "/start":
