@@ -23,42 +23,57 @@ current_index = 0
 
 app = FastAPI()
 
-def random_user_agent():
-    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-
-async def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-    async with aiohttp.ClientSession() as session:
-        await session.post(url, json=payload)
-
-async def update_proxy_health(proxy, success):
-    if proxy not in proxies_health:
-        proxies_health[proxy] = 0
-    proxies_health[proxy] += 1 if success else -1
-    if proxies_health[proxy] < -3:
-        if proxy in proxies:
-            proxies.remove(proxy)
-
-async def replenish_proxies():
-    url = "https://proxy.webshare.io/api/v2/proxy/list/download/"
+async def fetch_proxies():
+    global proxies
+    url = "https://proxy.webshare.io/api/proxy/list/"
     headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as r:
-            if r.status == 200:
-                text = await r.text()
-                new_proxies = [f"http://{line.strip()}" for line in text.splitlines()]
-                proxies.extend(p for p in new_proxies if p not in proxies)
-                for p in new_proxies:
-                    proxies_health[p] = 0
+        async with session.get(url, headers=headers) as resp:
+            data = await resp.json()
+            new_proxies = []
+            for item in data.get("results", []):
+                proxy_str = f"http://{item['proxy_address']}:{item['ports']['http']}"
+                new_proxies.append(proxy_str)
+            proxies = new_proxies
+            # Initialize health dictionary
+            for p in proxies:
+                proxies_health[p] = 1.0  # start with 100% health
 
-def load_usernames():
-    global usernames
-    if os.path.exists("wordlist.txt"):
-        with open("wordlist.txt") as f:
-            usernames = [line.strip() for line in f if line.strip()]
+async def update_proxy_health(proxy, success):
+    # simple health update: decrease on failure, increase on success
+    health = proxies_health.get(proxy, 1.0)
+    if success:
+        health = min(1.0, health + 0.1)
     else:
-        usernames = []
+        health = max(0, health - 0.2)
+    proxies_health[proxy] = health
+    # Remove proxy if health too low
+    if health <= 0:
+        if proxy in proxies:
+            proxies.remove(proxy)
+        if proxy in proxies_health:
+            del proxies_health[proxy]
+
+def random_user_agent():
+    agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)...",
+        # add more if you want
+    ]
+    return random.choice(agents)
+
+async def send_telegram(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            await session.post(url, json=payload)
+        except Exception as e:
+            print(f"Telegram send error: {e}")
 
 async def check_username(username, proxy):
     url = f"https://www.tiktok.com/@{username}"
@@ -76,57 +91,74 @@ async def check_username(username, proxy):
         await update_proxy_health(proxy, False)
         return False
 
+async def replenish_proxies_if_needed():
+    if len(proxies) < 50:
+        await send_telegram(f"Proxy count low ({len(proxies)}). Replenishing proxies...")
+        await fetch_proxies()
+        await send_telegram(f"Proxies replenished. Total now: {len(proxies)}")
+
 async def start_checking(total_to_check):
     global checking, checked_count, available_usernames, current_index
     checking = True
     checked_count = 0
     available_usernames.clear()
     start_time = time.time()
-    await send_telegram(f"🔍 Starting check for {total_to_check} usernames...")
+    await send_telegram(f"Starting check for {total_to_check} usernames...")
+
     while checking and checked_count < total_to_check and current_index < len(usernames):
         username = usernames[current_index]
         current_index += 1
-        proxy = random.choice(proxies)
+        proxy = random.choice(proxies) if proxies else None
+        if not proxy:
+            await send_telegram("No proxies available. Waiting 5 seconds...")
+            await asyncio.sleep(5)
+            await replenish_proxies_if_needed()
+            continue
         available = await check_username(username, proxy)
         checked_count += 1
         if available:
             available_usernames.append(username)
-            await send_telegram(f"✅ Available: {username}")
-        if len(proxies) < 50:
-            await replenish_proxies()
+            await send_telegram(f"Available: {username}")
+        await replenish_proxies_if_needed()
         if checked_count % 10 == 0 or checked_count == total_to_check:
             elapsed = time.time() - start_time
             eta = (elapsed / checked_count) * (total_to_check - checked_count)
-            await send_telegram(f"Progress: {checked_count}/{total_to_check} usernames | ETA: {int(eta)}s")
+            await send_telegram(f"Checked {checked_count}/{total_to_check} usernames. ETA: {int(eta)}s")
+
     checking = False
-    await send_telegram("🎯 Username checking complete!")
+    await send_telegram("Checking complete!")
 
 async def stop_checking():
     global checking
     checking = False
-    await send_telegram("🛑 Checking stopped.")
+    await send_telegram("Checking stopped.")
 
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     data = await request.json()
-    message = data.get("message", {})
-    text = message.get("text", "")
-    if text.startswith("/start"):
-        try:
-            total = int(text.split()[1]) if len(text.split()) > 1 else 1000
-        except:
-            total = 1000
-        asyncio.create_task(start_checking(total))
-    elif text.startswith("/stop"):
-        await stop_checking()
-    elif text.startswith("/proxies"):
-        total_proxies = len(proxies)
-        removed = max(0, 100 - total_proxies)
-        await send_telegram(f"⚙️ Proxies working: {total_proxies}/100 | Removed: {removed}")
+    if "message" in data:
+        message = data["message"]
+        text = message.get("text", "")
+        chat_id = message["chat"]["id"]
+        # Only respond to your chat id
+        if str(chat_id) != str(TELEGRAM_CHAT_ID):
+            return {"ok": True}
+        if text.startswith("/start"):
+            parts = text.split()
+            try:
+                total = int(parts[1]) if len(parts) > 1 else 1000
+            except:
+                total = 1000
+            await send_telegram(f"Starting username check for {total} usernames.")
+            asyncio.create_task(start_checking(total))
+        elif text.startswith("/stop"):
+            await stop_checking()
+        elif text.startswith("/proxies"):
+            total_proxies = len(proxies)
+            removed = max(0, 100 - total_proxies)
+            await send_telegram(f"Proxies working: {total_proxies}/100, removed: {removed}")
     return {"ok": True}
 
 if __name__ == "__main__":
     import uvicorn
-    load_usernames()
-    asyncio.run(replenish_proxies())
-    uvicorn.run("checker:app", host="0.0.0.0", port=8000)
+    uvicorn.run("checker:app", host="0.0.0.0", port=8000, reload=True)
