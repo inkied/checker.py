@@ -1,45 +1,43 @@
 import os
-import aiohttp
-import asyncio
 import random
-import string
-import itertools
+import asyncio
+import aiohttp
 import logging
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
-from typing import List
-from aiohttp import ClientSession
-from starlette.responses import JSONResponse
 
 load_dotenv()
 
-telegram_api = os.getenv("TELEGRAM_TOKEN")
+telegram_api = os.getenv("TELEGRAM_API_TOKEN")
 chat_id = os.getenv("TELEGRAM_CHAT_ID")
 webshare_key = os.getenv("WEBSHARE_API_KEY")
-telegram_webhook = os.getenv("TELEGRAM_WEBHOOK_URL")
 
 app = FastAPI()
-
 proxies = []
-available_usernames = []
-running = False
-themes = ["career", "philosophy", "gaming", "jail", "nerdy", "feelings", "market"]
 
-MAX_CONCURRENT = 40
-BATCH_SIZE = 5
-PROXY_TIMEOUT = 7
+logging.basicConfig(level=logging.INFO)
 
-async def send_telegram_message(text: str, buttons=None):
+async def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{telegram_api}/sendMessage"
     payload = {
         "chat_id": chat_id,
-        "text": text,
+        "text": message,
         "parse_mode": "Markdown"
     }
-    if buttons:
-        payload["reply_markup"] = {"inline_keyboard": buttons}
     async with aiohttp.ClientSession() as session:
         await session.post(url, json=payload)
+
+async def validate_proxies(proxy_list):
+    valid = []
+    for proxy in proxy_list:
+        try:
+            conn = aiohttp.ProxyConnector.from_url(f"http://{proxy}")
+            async with aiohttp.ClientSession(connector=conn) as session:
+                async with session.get("https://www.tiktok.com", timeout=5):
+                    valid.append(proxy)
+        except:
+            continue
+    return valid
 
 async def scrape_webshare():
     global proxies
@@ -48,106 +46,56 @@ async def scrape_webshare():
         headers = {"Authorization": f"Token {webshare_key}"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
-                data = await resp.json()
-                raw = [f"{x['username']}:{x['password']}@{x['proxy_address']}:{x['port']}" for x in data["results"]]
+                text = await resp.text()
+                try:
+                    data = await resp.json()
+                except Exception as json_err:
+                    logging.error(f"Failed to parse JSON: {json_err}")
+                    return
+
+                if "results" not in data:
+                    logging.error(f"Webshare API error: {data}")
+                    return
+
+                raw = [
+                    f"{x['username']}:{x['password']}@{x['proxy_address']}:{x['port']}"
+                    for x in data["results"]
+                ]
+
         proxies = await validate_proxies(raw)
     except Exception as e:
         logging.error(f"Webshare error: {e}")
 
-async def validate_proxies(proxy_list):
-    valid = []
-    async def test(proxy):
-        try:
-            proxy_url = f"http://{proxy}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get("https://www.tiktok.com", proxy=proxy_url, timeout=PROXY_TIMEOUT):
-                    valid.append(proxy_url)
-        except:
-            pass
-    await asyncio.gather(*[test(p) for p in proxy_list])
-    return valid
+async def check_username(username):
+    proxy = random.choice(proxies) if proxies else None
+    proxy_url = f"http://{proxy}" if proxy else None
+    url = f"https://www.tiktok.com/@{username}"
 
-def generate_username(theme):
-    base = {
-        "career": ["ceo", "law", "dev", "cfo", "biz"],
-        "philosophy": ["zen", "dao", "vibe", "life", "mind"],
-        "gaming": ["fps", "ggr", "aim", "noob", "clan"],
-        "jail": ["cell", "bars", "trap", "fel", "unit"],
-        "nerdy": ["byte", "code", "ram", "nerd", "sys"],
-        "feelings": ["sad", "luv", "mood", "rawr", "hurt"],
-        "market": ["deal", "buy", "cart", "sell", "rack"]
-    }
-    seed = random.choice(base.get(theme, ["user", "test"]))
-    suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4 - len(seed)))
-    return (seed + suffix)[:4]
-
-async def check_username(session: ClientSession, username: str, proxy: str):
     try:
-        url = f"https://www.tiktok.com/@{username}"
-        async with session.get(url, proxy=proxy, timeout=PROXY_TIMEOUT) as resp:
-            if resp.status == 404:
-                return username
-    except:
-        pass
-    return None
-
-async def batch_check():
-    global available_usernames
-    theme_cycle = itertools.cycle(themes)
-
-    while running:
-        theme = next(theme_cycle)
-        await send_telegram_message(f"🔍 Checking themed batch: *{theme}*")
         async with aiohttp.ClientSession() as session:
-            tasks = []
-            proxy_cycle = itertools.cycle(proxies)
-            for _ in range(BATCH_SIZE):
-                username = generate_username(theme)
-                proxy = next(proxy_cycle)
-                tasks.append(check_username(session, username, proxy))
-            results = await asyncio.gather(*tasks)
-            found = [r for r in results if r]
-            if found:
-                available_usernames.extend(found)
-                await send_telegram_message(
-                    "*Available usernames:*\n" + "\n".join(found),
-                    buttons=[[{"text": "Claim", "callback_data": "claim"}]]
-                )
-        await asyncio.sleep(2)
+            async with session.get(url, proxy=proxy_url, timeout=10) as resp:
+                if resp.status == 404:
+                    await send_telegram_message(f"Available: `{username}`")
+    except Exception as e:
+        logging.warning(f"Error checking {username}: {e}")
+
+def generate_usernames():
+    letters = 'abcdefghijklmnopqrstuvwxyz'
+    return [''.join(random.choices(letters, k=4)) for _ in range(100)]
+
+async def start_checking():
+    await scrape_webshare()
+    while True:
+        usernames = generate_usernames()
+        await asyncio.gather(*(check_username(u) for u in usernames))
+        await asyncio.sleep(1)
 
 @app.post("/webhook")
-async def telegram_webhook_handler(request: Request):
-    global running
-    data = await request.json()
-
+async def telegram_webhook(req: Request):
+    data = await req.json()
     if "message" in data:
-        text = data["message"]["text"]
-        if text == "/start":
-            buttons = [[
-                {"text": "Start", "callback_data": "start"},
-                {"text": "Stop", "callback_data": "stop"},
-                {"text": "Refresh Proxies", "callback_data": "refresh"}
-            ]]
-            await send_telegram_message("🤖 Bot Ready", buttons)
-    elif "callback_query" in data:
-        query = data["callback_query"]
-        cmd = query["data"]
-        if cmd == "start":
-            if not running:
-                running = True
-                await send_telegram_message("✅ Started")
-                asyncio.create_task(batch_check())
-        elif cmd == "stop":
-            running = False
-            await send_telegram_message("⏹️ Stopped")
-        elif cmd == "refresh":
-            await scrape_webshare()
-            await send_telegram_message(f"🔁 Proxies refreshed. {len(proxies)} working.")
-        elif cmd == "claim":
-            await send_telegram_message("⚠️ Manual claiming required.")
-
-    return JSONResponse({"ok": True})
-
-@app.on_event("startup")
-async def on_startup():
-    await scrape_webshare()
+        text = data["message"].get("text", "")
+        if text.lower() == "start":
+            asyncio.create_task(start_checking())
+            await send_telegram_message("Checker started.")
+    return {"ok": True}
