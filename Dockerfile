@@ -1,28 +1,20 @@
-FROM python:3.12-slim
-
-# Install system dependencies required for aiohttp and others
-RUN apt-get update && apt-get install -y \
-    gcc \
-    build-essential \
-    libffi-dev \
-    libssl-dev \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Use official Python slim image
+FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
 
-# Copy only requirements first for caching
+# Copy requirements first to leverage Docker cache
 COPY requirements.txt .
 
-# Upgrade pip and setuptools
-RUN pip install --upgrade pip setuptools wheel
-
-# Install Python dependencies
+# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all project files
+# Copy all app files
 COPY . .
 
-# Run the FastAPI app
-CMD ["uvicorn", "checker:app", "--host", "0.0.0.0", "--port", "8000"]
+# Expose port (FastAPI default)
+EXPOSE 8000
+
+# Run the FastAPI app with Uvicorn
+CMD ["uvicorn", "your_script_filename:app", "--host", "0.0.0.0", "--port", "8000"]
