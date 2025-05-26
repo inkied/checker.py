@@ -23,28 +23,6 @@ current_index = 0
 
 app = FastAPI()
 
-# Webhook setup
-async def set_telegram_webhook():
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
-    payload = {"url": WEBHOOK_PATH}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, json=payload) as resp:
-                if resp.status == 200:
-                    print("✅ Webhook set successfully.")
-                else:
-                    error_text = await resp.text()
-                    print(f"❌ Failed to set webhook: {resp.status}, {error_text}")
-        except Exception as e:
-            print(f"❌ Exception setting webhook: {e}")
-
-@app.on_event("startup")
-async def startup_event():
-    await set_telegram_webhook()
-    await fetch_proxies()
-    print("✅ Startup complete.")
-
-# Proxy fetching
 async def fetch_proxies():
     global proxies
     url = "https://proxy.webshare.io/api/proxy/list/"
@@ -56,20 +34,23 @@ async def fetch_proxies():
             for item in data.get("results", []):
                 proxy_str = f"http://{item['proxy_address']}:{item['ports']['http']}"
                 new_proxies.append(proxy_str)
-            proxies = new_proxies
+            proxies[:] = new_proxies
             for p in proxies:
                 proxies_health[p] = 1.0
 
-# Proxy health
 async def update_proxy_health(proxy, success):
     health = proxies_health.get(proxy, 1.0)
-    health = min(1.0, health + 0.1) if success else max(0, health - 0.2)
+    if success:
+        health = min(1.0, health + 0.1)
+    else:
+        health = max(0, health - 0.2)
     proxies_health[proxy] = health
     if health <= 0:
-        proxies.remove(proxy)
-        proxies_health.pop(proxy, None)
+        if proxy in proxies:
+            proxies.remove(proxy)
+        if proxy in proxies_health:
+            del proxies_health[proxy]
 
-# User agent
 def random_user_agent():
     agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
@@ -77,37 +58,41 @@ def random_user_agent():
     ]
     return random.choice(agents)
 
-# Telegram message
 async def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
     async with aiohttp.ClientSession() as session:
         try:
             await session.post(url, json=payload)
         except Exception as e:
             print(f"Telegram send error: {e}")
 
-# Check TikTok username
 async def check_username(username, proxy):
     url = f"https://www.tiktok.com/@{username}"
     headers = {"User-Agent": random_user_agent()}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, proxy=proxy, timeout=10) as resp:
-                await update_proxy_health(proxy, True)
-                return resp.status == 404
+                if resp.status == 404:
+                    await update_proxy_health(proxy, True)
+                    return True
+                else:
+                    await update_proxy_health(proxy, True)
+                    return False
     except Exception:
         await update_proxy_health(proxy, False)
         return False
 
-# Replenish proxies
 async def replenish_proxies_if_needed():
     if len(proxies) < 50:
         await send_telegram(f"Proxy count low ({len(proxies)}). Replenishing proxies...")
         await fetch_proxies()
         await send_telegram(f"Proxies replenished. Total now: {len(proxies)}")
 
-# Start checking
 async def start_checking(total_to_check):
     global checking, checked_count, available_usernames, current_index
     checking = True
@@ -137,15 +122,13 @@ async def start_checking(total_to_check):
             await send_telegram(f"Checked {checked_count}/{total_to_check} usernames. ETA: {int(eta)}s")
 
     checking = False
-    await send_telegram("✅ Checking complete!")
+    await send_telegram("Checking complete!")
 
-# Stop checking
 async def stop_checking():
     global checking
     checking = False
-    await send_telegram("🛑 Checking stopped.")
+    await send_telegram("Checking stopped.")
 
-# Telegram webhook handler
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -161,7 +144,7 @@ async def telegram_webhook(request: Request):
                 total = int(parts[1]) if len(parts) > 1 else 1000
             except:
                 total = 1000
-            await send_telegram(f"▶️ Starting username check for {total} usernames.")
+            await send_telegram(f"Starting username check for {total} usernames.")
             asyncio.create_task(start_checking(total))
         elif text.startswith("/stop"):
             await stop_checking()
@@ -170,6 +153,23 @@ async def telegram_webhook(request: Request):
             removed = max(0, 100 - total_proxies)
             await send_telegram(f"Proxies working: {total_proxies}/100, removed: {removed}")
     return {"ok": True}
+
+async def set_telegram_webhook():
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    payload = {"url": WEBHOOK_PATH}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            result = await resp.json()
+            if result.get("ok"):
+                print("✅ Webhook set successfully.")
+            else:
+                print(f"❌ Failed to set webhook: {resp.status}, {result}")
+
+@app.on_event("startup")
+async def startup_event():
+    await fetch_proxies()
+    await set_telegram_webhook()
+    print("✅ Startup complete.")
 
 if __name__ == "__main__":
     import uvicorn
