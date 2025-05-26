@@ -5,12 +5,14 @@ import aiohttp
 import logging
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
+import httpx
 
 load_dotenv()
 
 telegram_api = os.getenv("TELEGRAM_API_TOKEN")
 chat_id = os.getenv("TELEGRAM_CHAT_ID")
 webshare_key = os.getenv("WEBSHARE_API_KEY")
+webhook_url = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.up.railway.app/webhook
 
 app = FastAPI()
 proxies = []
@@ -26,6 +28,23 @@ async def send_telegram_message(message):
     }
     async with aiohttp.ClientSession() as session:
         await session.post(url, json=payload)
+
+async def set_webhook():
+    if not webhook_url:
+        logging.error("WEBHOOK_URL env variable not set!")
+        return
+    url = f"https://api.telegram.org/bot{telegram_api}/setWebhook"
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(url, params={"url": webhook_url})
+        if resp.status_code == 200:
+            logging.info(f"Webhook set successfully: {await resp.text()}")
+        else:
+            logging.error(f"Failed to set webhook: {resp.status_code} {await resp.text()}")
+
+@app.on_event("startup")
+async def startup_event():
+    await set_webhook()
+    # You could start scraping proxies here or wait for /start command
 
 async def validate_proxies(proxy_list):
     valid = []
@@ -46,7 +65,6 @@ async def scrape_webshare():
         headers = {"Authorization": f"Token {webshare_key}"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
-                text = await resp.text()
                 try:
                     data = await resp.json()
                 except Exception as json_err:
@@ -63,6 +81,7 @@ async def scrape_webshare():
                 ]
 
         proxies = await validate_proxies(raw)
+        logging.info(f"Validated {len(proxies)} proxies from Webshare")
     except Exception as e:
         logging.error(f"Webshare error: {e}")
 
@@ -95,7 +114,7 @@ async def telegram_webhook(req: Request):
     data = await req.json()
     if "message" in data:
         text = data["message"].get("text", "")
-        if text.lower() == "start":
+        if text.lower() == "/start":
             asyncio.create_task(start_checking())
             await send_telegram_message("Checker started.")
     return {"ok": True}
