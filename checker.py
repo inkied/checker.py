@@ -133,7 +133,7 @@ async def stop_checking():
     checking = False
     await send_telegram("Checking stopped.")
 
-@app.post(WEBHOOK_PATH)
+@app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
     if "message" in data:
