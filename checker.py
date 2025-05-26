@@ -23,6 +23,21 @@ current_index = 0
 
 app = FastAPI()
 
+@app.on_event("startup")
+async def set_telegram_webhook():
+    webhook_url = WEBHOOK_PATH
+    set_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    payload = {"url": webhook_url}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(set_url, json=payload) as resp:
+                if resp.status == 200:
+                    print("✅ Telegram webhook set successfully.")
+                else:
+                    print(f"❌ Failed to set webhook: {resp.status}")
+        except Exception as e:
+            print(f"Webhook setup error: {e}")
+
 async def fetch_proxies():
     global proxies
     url = "https://proxy.webshare.io/api/proxy/list/"
@@ -35,19 +50,16 @@ async def fetch_proxies():
                 proxy_str = f"http://{item['proxy_address']}:{item['ports']['http']}"
                 new_proxies.append(proxy_str)
             proxies = new_proxies
-            # Initialize health dictionary
             for p in proxies:
-                proxies_health[p] = 1.0  # start with 100% health
+                proxies_health[p] = 1.0
 
 async def update_proxy_health(proxy, success):
-    # simple health update: decrease on failure, increase on success
     health = proxies_health.get(proxy, 1.0)
     if success:
         health = min(1.0, health + 0.1)
     else:
         health = max(0, health - 0.2)
     proxies_health[proxy] = health
-    # Remove proxy if health too low
     if health <= 0:
         if proxy in proxies:
             proxies.remove(proxy)
@@ -58,7 +70,6 @@ def random_user_agent():
     agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)...",
-        # add more if you want
     ]
     return random.choice(agents)
 
@@ -140,7 +151,6 @@ async def telegram_webhook(request: Request):
         message = data["message"]
         text = message.get("text", "")
         chat_id = message["chat"]["id"]
-        # Only respond to your chat id
         if str(chat_id) != str(TELEGRAM_CHAT_ID):
             return {"ok": True}
         if text.startswith("/start"):
