@@ -3,6 +3,7 @@ import asyncio
 import aiohttp
 import logging
 import random
+import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -27,31 +28,75 @@ if not all([TELEGRAM_API, CHAT_ID, WEBHOOK_URL, WEBSHARE_API_KEY]):
 app = FastAPI()
 checking = False
 proxies = []
-proxy_index = 0
-proxy_usage_count = {}
+proxy_usage = {}
+proxy_cooldowns = {}
 proxy_retries = {}
-MAX_PROXY_USAGE = 15
 MAX_RETRIES = 3
+MAX_PROXY_USAGE = 20
+PROXY_COOLDOWN = 300  # 5 minutes cooldown in seconds
+MAX_CONCURRENT_CHECKS = 40
+
+used_wordlist = set()
 taken_usernames = set()
 
-# --- Utilities ---
-def generate_random_4letter():
-    chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
-    while True:
-        username = ''.join(random.choices(chars, k=4))
-        if username not in taken_usernames:
-            return username
+# --- Load and prepare wordlist ---
+def load_wordlist():
+    # Try loading wordlist.txt file with 20k usernames (letters and digits)
+    path = "wordlist.txt"
+    if not os.path.exists(path):
+        logger.error(f"{path} not found. Please provide a wordlist.txt file with usernames.")
+        raise SystemExit(1)
+    with open(path, "r") as f:
+        words = [line.strip().lower() for line in f if line.strip()]
+    random.shuffle(words)
+    logger.info(f"Loaded wordlist with {len(words)} usernames.")
+    return words
 
+wordlist = load_wordlist()
+
+# --- Telegram Messaging ---
 async def send_telegram_message(message):
     async with aiohttp.ClientSession() as session:
-        await session.post(f"https://api.telegram.org/bot{TELEGRAM_API}/sendMessage", json={
-            "chat_id": CHAT_ID,
-            "text": message
-        })
+        try:
+            await session.post(f"https://api.telegram.org/bot{TELEGRAM_API}/sendMessage", json={
+                "chat_id": CHAT_ID,
+                "text": message
+            })
+        except Exception as e:
+            logger.warning(f"Failed to send Telegram message: {e}")
 
 async def set_webhook():
     async with aiohttp.ClientSession() as session:
-        await session.post(f"https://api.telegram.org/bot{TELEGRAM_API}/setWebhook", data={"url": WEBHOOK_URL})
+        try:
+            await session.post(f"https://api.telegram.org/bot{TELEGRAM_API}/setWebhook", data={"url": WEBHOOK_URL})
+            logger.info("Telegram webhook set successfully.")
+        except Exception as e:
+            logger.error(f"Failed to set Telegram webhook: {e}")
+
+# --- Proxy Management ---
+def get_available_proxy():
+    now = time.time()
+    available = [p for p in proxies if
+                 proxy_usage.get(p, 0) < MAX_PROXY_USAGE and
+                 proxy_retries.get(p, 0) < MAX_RETRIES and
+                 proxy_cooldowns.get(p, 0) <= now]
+    if not available:
+        return None
+    return random.choice(available)
+
+def mark_proxy_usage(proxy):
+    proxy_usage[proxy] = proxy_usage.get(proxy, 0) + 1
+    if proxy_usage[proxy] >= MAX_PROXY_USAGE:
+        proxy_cooldowns[proxy] = time.time() + PROXY_COOLDOWN
+        proxy_usage[proxy] = 0
+        logger.info(f"Proxy cooldown activated: {proxy}")
+
+def mark_proxy_failure(proxy):
+    proxy_retries[proxy] = proxy_retries.get(proxy, 0) + 1
+    if proxy_retries[proxy] >= MAX_RETRIES:
+        proxy_cooldowns[proxy] = time.time() + PROXY_COOLDOWN
+        proxy_retries[proxy] = 0
+        logger.info(f"Proxy banned/failed and cooldown started: {proxy}")
 
 async def fetch_proxies():
     url = f"https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100"
@@ -61,59 +106,65 @@ async def fetch_proxies():
             data = await res.json()
             return [f"http://{p['username']}:{p['password']}@{p['proxy_address']}:{p['port']}" for p in data['results']]
 
-def get_next_proxy():
-    global proxy_index
-    if not proxies:
-        return None
+# --- Username generation from wordlist or fallback ---
+def generate_username():
+    while wordlist:
+        candidate = wordlist.pop(0)
+        if candidate not in taken_usernames and candidate not in used_wordlist:
+            used_wordlist.add(candidate)
+            return candidate
+    # fallback random 4 chars letters + digits
+    while True:
+        candidate = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=4))
+        if candidate not in taken_usernames and candidate not in used_wordlist:
+            used_wordlist.add(candidate)
+            return candidate
 
-    for _ in range(len(proxies)):
-        proxy = proxies[proxy_index % len(proxies)]
-        usage = proxy_usage_count.get(proxy, 0)
-        retries = proxy_retries.get(proxy, 0)
-        if usage < MAX_PROXY_USAGE and retries < MAX_RETRIES:
-            proxy_usage_count[proxy] = usage + 1
-            proxy_index += 1
-            return proxy
-        proxy_index += 1
+# --- Checking usernames ---
+async def check_username(semaphore):
+    async with semaphore:
+        username = generate_username()
+        proxy = None
+        for _ in range(5):
+            proxy = get_available_proxy()
+            if proxy:
+                break
+            await asyncio.sleep(1)
+        if not proxy:
+            # No proxies available, wait and retry later
+            await asyncio.sleep(5)
+            return
 
-    # Reset if all proxies maxed out or bad
-    proxy_usage_count.clear()
-    proxy_retries.clear()
-    return get_next_proxy()
+        mark_proxy_usage(proxy)
+        url = f"https://www.tiktok.com/@{username}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, proxy=proxy, timeout=10) as res:
+                    logger.info(f"Checked @{username} | Status: {res.status}")
+                    if res.status == 404:
+                        await send_telegram_message(f"Available: @{username}")
+                        taken_usernames.add(username)  # Mark as found available
+                    else:
+                        taken_usernames.add(username)  # Mark as taken to skip next time
+        except Exception as e:
+            logger.warning(f"Proxy failed: {proxy} | {e}")
+            mark_proxy_failure(proxy)
 
-async def check_username(username):
-    proxy = get_next_proxy()
-    if not proxy:
-        logger.warning("No proxies available, waiting 5 seconds...")
-        await asyncio.sleep(5)
-        return
-
-    url = f"https://www.tiktok.com/@{username}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, proxy=proxy, timeout=10) as res:
-                logger.info(f"@{username} | Status: {res.status}")
-                if res.status == 404:
-                    await send_telegram_message(f"Available: @{username}")
-                else:
-                    taken_usernames.add(username)
-    except Exception as e:
-        logger.warning(f"Proxy failed: {proxy} | {str(e)}")
-        proxy_retries[proxy] = proxy_retries.get(proxy, 0) + 1
-
+# --- Main checking loop ---
 async def start_checking():
     global checking
     checking = True
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHECKS)
     while checking:
-        username = generate_random_4letter()
-        await check_username(username)
-        # No sleep here — max speed with proxy balancing
+        await check_username(semaphore)
+        # Small sleep to avoid flooding, can tweak here
+        await asyncio.sleep(0.05)
 
 async def stop_checking():
     global checking
     checking = False
 
-# --- Webhook Routes ---
+# --- FastAPI webhook route ---
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -121,14 +172,16 @@ async def telegram_webhook(request: Request):
     if message == "/start":
         if not checking:
             asyncio.create_task(start_checking())
+            logger.info("Started checking.")
     elif message == "/stop":
         await stop_checking()
+        logger.info("Stopped checking.")
     return JSONResponse({"ok": True})
 
-# --- FastAPI Startup ---
+# --- Startup event ---
 @app.on_event("startup")
 async def on_startup():
     global proxies
     proxies = await fetch_proxies()
     await set_webhook()
-    logger.info("Webhook set and proxies loaded.")
+    logger.info(f"Loaded {len(proxies)} proxies and webhook set.")
