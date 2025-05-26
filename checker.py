@@ -1,53 +1,97 @@
-import logging
+import os
+import aiohttp
+import asyncio
+import random
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from contextlib import asynccontextmanager
-import os
-import httpx
+from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
+load_dotenv()
 
-telegram_api = os.getenv("TELEGRAM_API")  # Your Telegram bot token, e.g. '7527264620:ABC...'
-chat_id = os.getenv("TELEGRAM_CHAT_ID")   # Your chat ID as string
-webhook_url = os.getenv("WEBHOOK_URL")    # Your webhook HTTPS URL, e.g. 'https://checker.up.railway.app/webhook'
+TELEGRAM_API = os.getenv("TELEGRAM_API")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-async def set_webhook():
-    if not telegram_api or not webhook_url:
-        raise ValueError("Missing TELEGRAM_API or WEBHOOK_URL environment variable")
+THEMED_WORDS_URL = "https://raw.githubusercontent.com/inkied/checker.py/main/themed_words.txt"
 
-    url = f"https://api.telegram.org/bot{telegram_api}/setWebhook"
-    params = {"url": webhook_url}
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(url, params=params)
-        logging.info(f"Telegram setWebhook response status: {resp.status_code}")
-        if resp.status_code != 200:
-            raise Exception(f"Failed to set webhook: {resp.text}")
+RUNNING = False
+AVAILABLE_USERNAMES = []
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+app = FastAPI()
+
+# Fetch and parse themed words
+async def fetch_themed_words():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(THEMED_WORDS_URL) as resp:
+            text = await resp.text()
+    words = []
+    for line in text.splitlines():
+        if line and not line.endswith(":"):
+            words.extend([w.strip() for w in line.split(",")])
+    return list(set(words))
+
+# Check if a username is available on TikTok
+async def is_available(username, session):
     try:
-        logging.info("Starting app lifespan, setting Telegram webhook...")
-        await set_webhook()
-        logging.info("Telegram webhook set successfully.")
-        yield
-    except Exception as e:
-        logging.error(f"Lifespan startup error:", exc_info=True)
-        raise
+        url = f"https://www.tiktok.com/@{username}"
+        async with session.get(url, timeout=10) as resp:
+            return resp.status == 404
+    except:
+        return False
 
-app = FastAPI(lifespan=lifespan)
+# Send batched results to Telegram
+async def notify_telegram_batch(usernames):
+    if not TELEGRAM_API or not TELEGRAM_CHAT_ID:
+        return
+    text = "✅ Available TikTok usernames:\n" + "\n".join(usernames)
+    url = f"https://api.telegram.org/bot{TELEGRAM_API}/sendMessage"
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text
+        })
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logging.error(f"Unhandled exception:", exc_info=True)
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+# Username checking loop
+async def check_loop():
+    global RUNNING
+    words = await fetch_themed_words()
+    async with aiohttp.ClientSession() as session:
+        while RUNNING:
+            username = random.choice(words).lower()
+            if await is_available(username, session):
+                AVAILABLE_USERNAMES.append(username)
+                if len(AVAILABLE_USERNAMES) >= 5:
+                    await notify_telegram_batch(AVAILABLE_USERNAMES[:])
+                    AVAILABLE_USERNAMES.clear()
+            await asyncio.sleep(0.5)
+
+# Telegram webhook to start/stop
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    global RUNNING
+    data = await request.json()
+    message = data.get("message", {})
+    text = message.get("text", "")
+    if text == "/start":
+        if not RUNNING:
+            RUNNING = True
+            asyncio.create_task(check_loop())
+        return JSONResponse({"status": "started"})
+    elif text == "/stop":
+        RUNNING = False
+        return JSONResponse({"status": "stopped"})
+    return JSONResponse({"status": "ignored"})
 
 @app.get("/")
 async def root():
-    return {"message": "Hello, world!"}
+    words = await fetch_themed_words()
+    return {"sample": words[:10], "count": len(words)}
 
-# Optional startup logging of env vars (remove if sensitive)
 @app.on_event("startup")
-async def startup_event():
-    logging.info(f"Telegram API set: {'yes' if telegram_api else 'no'}")
-    logging.info(f"Chat ID set: {'yes' if chat_id else 'no'}")
-    logging.info(f"Webhook URL set: {'yes' if webhook_url else 'no'}")
+async def on_startup():
+    if TELEGRAM_API and WEBHOOK_URL:
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                f"https://api.telegram.org/bot{TELEGRAM_API}/setWebhook",
+                params={"url": WEBHOOK_URL}
+            )
