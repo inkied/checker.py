@@ -17,23 +17,6 @@ webhook_url = os.getenv("WEBHOOK_URL")
 
 logging.basicConfig(level=logging.INFO)
 
-# Themed wordlists (expand as needed)
-racing_words = ["drift", "speed", "turbo", "circuit", "track", "pitstop"]
-anime_words = ["senpai", "kawaii", "manga", "anime", "otaku", "sakura"]
-language_words = ["english", "grammar", "syntax", "accent", "slang"]
-crypto_words = ["bitcoin", "crypto", "ledger", "wallet", "token", "block"]
-medical_words = ["nurse", "surgery", "clinic", "medkit", "vitals"]
-gaming_words = ["frag", "loot", "respawn", "noob", "gamer", "clan"]
-
-all_themes = [
-    ("racing", racing_words),
-    ("anime", anime_words),
-    ("language", language_words),
-    ("crypto", crypto_words),
-    ("medical", medical_words),
-    ("gaming", gaming_words)
-]
-
 async def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{telegram_api}/sendMessage"
     payload = {
@@ -52,9 +35,9 @@ async def set_webhook():
     async with httpx.AsyncClient() as client:
         resp = await client.post(url, params={"url": webhook_url})
         if resp.status_code == 200:
-            logging.info(f"Webhook set successfully: {await resp.aread()}")
+            logging.info(f"Webhook set successfully: {await resp.text()}")
         else:
-            logging.error(f"Failed to set webhook: {resp.status_code} {await resp.aread()}")
+            logging.error(f"Failed to set webhook: {resp.status_code} {await resp.text()}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -83,14 +66,21 @@ async def scrape_webshare():
         headers = {"Authorization": f"Token {webshare_key}"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
-                data = await resp.json()
+                try:
+                    data = await resp.json()
+                except Exception as json_err:
+                    logging.error(f"Failed to parse JSON: {json_err}")
+                    return
+
                 if "results" not in data:
                     logging.error(f"Webshare API error: {data}")
                     return
+
                 raw = [
                     f"{x['username']}:{x['password']}@{x['proxy_address']}:{x['port']}"
                     for x in data["results"]
                 ]
+
         proxies = await validate_proxies(raw)
         logging.info(f"Validated {len(proxies)} proxies from Webshare")
     except Exception as e:
@@ -109,14 +99,44 @@ async def check_username(username):
     except Exception as e:
         logging.warning(f"Error checking {username}: {e}")
 
+def load_wordlist():
+    # Combined themes including religion, jail, politics, and others
+    return [
+        # Gaming
+        "noob", "gamer", "frag", "clutch", "combo", "ggwp",
+        # Crypto
+        "block", "chain", "token", "eth", "wallet", "mining",
+        # Medical
+        "nurse", "medic", "doctor", "vital", "pill", "dose",
+        # Financial
+        "loan", "debt", "bank", "cash", "stock", "invest",
+        # Working
+        "boss", "grind", "task", "shift", "labor", "hustle",
+        # Jail
+        "cell", "lockup", "warden", "felon", "bars", "inmate",
+        # Shooting/Hunting
+        "sniper", "scope", "hunt", "prey", "rifle", "aim",
+        # Philosophy/Politics/Religion
+        "logic", "faith", "truth", "vote", "pray", "law",
+        # Technology/Geek
+        "code", "nerd", "dev", "api", "bug", "debug",
+        # Selling/Shopping
+        "deal", "sale", "cart", "shop", "buy", "sell",
+        # Language
+        "speak", "tongue", "slang", "babel", "latin", "greek",
+        # Anime
+        "senpai", "baka", "otaku", "manga", "chibi", "kawaii",
+        # History
+        "empire", "dynasty", "war", "reign", "era", "legend"
+    ]
+
 async def start_checking():
     await scrape_webshare()
     while True:
-        for theme_name, wordlist in all_themes:
-            batch = random.sample(wordlist, min(10, len(wordlist)))
-            await send_telegram_message(f"\u23f3 Checking theme: *{theme_name}*...")
-            await asyncio.gather(*(check_username(u) for u in batch))
-            await asyncio.sleep(1)
+        usernames = load_wordlist()
+        random.shuffle(usernames)
+        await asyncio.gather(*(check_username(u) for u in usernames))
+        await asyncio.sleep(1)
 
 @app.post("/webhook")
 async def telegram_webhook(req: Request):
