@@ -11,7 +11,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_PATH")  # This is the full URL, not just the path
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH")  # This is the full URL, not just the path
 
 proxies = []
 proxies_health = {}
