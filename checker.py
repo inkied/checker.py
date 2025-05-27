@@ -11,7 +11,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH")  # Must be full URL, e.g. https://yourdomain.com/webhook
+WEBHOOK_URL = os.getenv("WEBHOOK_PATH")  # This is the full URL, not just the path
 
 proxies = []
 proxies_health = {}
@@ -156,7 +156,7 @@ async def telegram_webhook(request: Request):
 
 async def set_telegram_webhook():
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
-    payload = {"url": WEBHOOK_PATH}
+    payload = {"url": WEBHOOK_URL}
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as resp:
             result = await resp.json()
