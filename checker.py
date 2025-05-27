@@ -8,12 +8,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import aiohttp
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBSHARE_API_KEY = os.getenv("WEBSHARE_API_KEY")
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH")  # Must be full URL, e.g. https://yourdomain.com/webhook
 
 proxies = []
 proxies_health = {}
@@ -158,8 +156,7 @@ async def telegram_webhook(request: Request):
 
 async def set_telegram_webhook():
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
-    full_webhook_url = f"{WEBHOOK_PATH}/webhook"
-    payload = {"url": "https://checkerpy-production-a7e1.up.railway.app/webhook"}
+    payload = {"url": WEBHOOK_PATH}
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as resp:
             result = await resp.json()
