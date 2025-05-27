@@ -156,7 +156,9 @@ async def telegram_webhook(request: Request):
 
 async def set_telegram_webhook():
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
-    payload = {"url": WEBHOOK_URL}
+    DEPLOYMENT_URL = "https://checkerpy-production-a7e1.up.railway.app"
+    full_webhook_url = f"{DEPLOYMENT_URL}{WEBHOOK_PATH}"
+    payload = {"url": full_webhook_url}
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as resp:
             result = await resp.json()
