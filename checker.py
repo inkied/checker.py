@@ -8,7 +8,8 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-APP_URL = os.getenv("APP_URL")  # e.g. https://your-app-name.up.railway.app
+APP_URL = os.getenv("APP_URL")  # Should be just your domain, e.g. https://checkerpy-production-a7e1.up.railway.app
+WEBHOOK_PATH = "/webhook"       # Keep this just the path, not full URL
 
 app = FastAPI()
 
@@ -22,7 +23,7 @@ async def send_telegram_message(chat_id: int, text: str):
     async with aiohttp.ClientSession() as session:
         await session.post(url, json=payload)
 
-@app.post("/webhook")
+@app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
     data = await request.json()
     if "message" in data:
@@ -43,8 +44,7 @@ async def webhook(request: Request):
 
 @app.on_event("startup")
 async def startup_event():
-    # Set webhook to your /webhook endpoint on Railway
-    webhook_url = f"{APP_URL}/webhook"
+    webhook_url = f"{APP_URL}{WEBHOOK_PATH}"  # Construct full URL here
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
     payload = {"url": webhook_url}
     async with aiohttp.ClientSession() as session:
