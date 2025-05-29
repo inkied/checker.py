@@ -23,16 +23,16 @@ def generate_usernames(limit=5000):
             ch = random.choice(consonants)
             usernames.add(ch * 4)
         else:
-            uname = ''
-            for p in pattern:
-                uname += random.choice(consonants if p == 'C' else vowels)
+            uname = ''.join(random.choice(consonants if p == 'C' else vowels) for p in pattern)
             usernames.add(uname)
     print(f"[INFO] Generated {len(usernames)} usernames.")
     return list(usernames)
 
 async def fetch_proxies():
-    headers = {"Authorization": f"Token {webshare_api_key}"}
     url = "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100"
+    headers = {
+        "Authorization": f"Token {webshare_api_key}"
+    }
     print("[DEBUG] Fetching proxies from Webshare...")
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:
@@ -41,7 +41,7 @@ async def fetch_proxies():
                 return []
             data = await resp.json()
             proxies = [f"http://{p['proxy_address']}:{p['ports']['http']}" for p in data.get('results', [])]
-            print(f"[INFO] Fetched {len(proxies)} proxies.")
+            print(f"[DEBUG] {len(proxies)} proxies fetched.")
             return proxies
 
 async def check_username(session, proxy, username, found):
@@ -51,14 +51,11 @@ async def check_username(session, proxy, username, found):
             if resp.status == 404:
                 print(f"[AVAILABLE] {username}")
                 found.append(username)
-            else:
-                print(f"[TAKEN] {username} - status {resp.status}")
     except Exception as e:
-        print(f"[ERROR] {username} check failed: {e}")
+        pass  # Silently ignore broken proxies or timeouts
 
 async def send_telegram_batch(usernames):
     if not usernames:
-        print("[INFO] No available usernames to send.")
         return
     text = "\n".join(usernames)
     url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
@@ -67,8 +64,7 @@ async def send_telegram_batch(usernames):
         "text": f"🔥 Available TikTok usernames:\n{text}"
     }
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=data) as resp:
-            print(f"[INFO] Sent {len(usernames)} usernames to Telegram. Status: {resp.status}")
+        await session.post(url, data=data)
 
 async def main():
     usernames = generate_usernames(5000)
@@ -80,17 +76,14 @@ async def main():
     found = []
     sem = asyncio.Semaphore(25)
 
-    async def bound_check(username, proxy):
+    async def bound_check(username):
+        proxy = random.choice(proxies)
         async with sem:
             async with ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
                 await check_username(session, proxy, username, found)
                 await asyncio.sleep(random.uniform(0.4, 0.9))
 
-    tasks = []
-    for username in usernames:
-        proxy = random.choice(proxies)
-        tasks.append(bound_check(username, proxy))
-
+    tasks = [bound_check(username) for username in usernames]
     await asyncio.gather(*tasks)
     await send_telegram_batch(found)
 
