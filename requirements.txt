@@ -1,5 +1,2 @@
 aiohttp
-fastapi
-uvicorn
 python-dotenv
-aiofiles
