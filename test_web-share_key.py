@@ -1,7 +1,7 @@
 import asyncio
 import aiohttp
 
-WEBSHARE_API_KEY = "n4v8l3c6i2u7xn0w89nc6f5f9fbst0375oqj7gfi"
+WEBSHARE_API_KEY = "pialip63c4jeia0g8e8memjyj77ctky7ooq9b37q"
 PROXY_API_URL = "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=10"
 
 async def test_webshare_api():
