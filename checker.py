@@ -1,11 +1,8 @@
 import aiohttp
 import asyncio
 
-# Simple list of usernames to check
 usernames = ["testuser123", "abcd", "someuser", "notrealname"]
-
-# If you want to use proxies, put a single proxy string here like "http://ip:port"
-proxy = None  # e.g. "http://1.2.3.4:8080"
+proxy = None  # or "http://ip:port" if you want
 
 async def check_username(session, username):
     url = f"https://www.tiktok.com/@{username}"
@@ -14,13 +11,14 @@ async def check_username(session, username):
             if resp.status == 404:
                 print(f"[AVAILABLE] {username}")
             else:
-                print(f"[TAKEN or ERROR] {username} (status: {resp.status})")
+                print(f"[TAKEN] {username} (Status: {resp.status})")
     except Exception as e:
-        print(f"[ERROR] Checking {username}: {e}")
+        print(f"[ERROR] {username}: {e}")
 
 async def main():
-    async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-        tasks = [check_username(session, uname) for uname in usernames]
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        tasks = [check_username(session, username) for username in usernames]
         await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
