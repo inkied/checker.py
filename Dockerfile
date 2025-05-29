@@ -1,12 +1,17 @@
+# Use official lightweight Python image
 FROM python:3.11-slim
 
+# Set working directory inside container
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+# Copy project files
 COPY . .
 
-ENV PYTHONUNBUFFERED=1
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Expose port (not mandatory if your script doesn't serve HTTP)
+# EXPOSE 8080
+
+# Run the checker script on container start
+CMD ["python", "checker.py"]
