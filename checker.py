@@ -44,27 +44,25 @@ async def fetch_proxies():
             print(f"[DEBUG] {len(proxies)} proxies fetched.")
             return proxies
 
-async def check_username(session, proxy, username, found):
+async def send_telegram_alert(username):
+    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+    data = {
+        "chat_id": telegram_chat_id,
+        "text": f"✅ Available: `{username}`",
+        "parse_mode": "Markdown"
+    }
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, data=data)
+
+async def check_username(session, proxy, username):
     try:
         url = f"https://www.tiktok.com/@{username}"
         async with session.get(url, proxy=proxy, timeout=15) as resp:
             if resp.status == 404:
                 print(f"[AVAILABLE] {username}")
-                found.append(username)
-    except Exception as e:
-        pass  # Silently ignore broken proxies or timeouts
-
-async def send_telegram_batch(usernames):
-    if not usernames:
-        return
-    text = "\n".join(usernames)
-    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
-    data = {
-        "chat_id": telegram_chat_id,
-        "text": f"🔥 Available TikTok usernames:\n{text}"
-    }
-    async with aiohttp.ClientSession() as session:
-        await session.post(url, data=data)
+                await send_telegram_alert(username)
+    except:
+        pass  # Silently ignore errors
 
 async def main():
     usernames = generate_usernames(5000)
@@ -73,19 +71,17 @@ async def main():
         print("[FATAL] No proxies available. Exiting.")
         return
 
-    found = []
     sem = asyncio.Semaphore(25)
 
     async def bound_check(username):
         proxy = random.choice(proxies)
         async with sem:
             async with ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-                await check_username(session, proxy, username, found)
+                await check_username(session, proxy, username)
                 await asyncio.sleep(random.uniform(0.4, 0.9))
 
     tasks = [bound_check(username) for username in usernames]
     await asyncio.gather(*tasks)
-    await send_telegram_batch(found)
 
 if __name__ == "__main__":
     asyncio.run(main())
